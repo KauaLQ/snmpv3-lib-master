@@ -1,0 +1,65 @@
+
+This directory is intended for project specific (private) libraries.
+PlatformIO will compile them to static libraries and link into the executable file.
+
+The source code of each library should be placed in a separate directory
+("lib/your_library_name/[Code]").
+
+For example, see the structure of the following example libraries `Foo` and `Bar`:
+
+|--lib
+|  |
+|  |--Bar
+|  |  |--docs
+|  |  |--examples
+|  |  |--src
+|  |     |- Bar.c
+|  |     |- Bar.h
+|  |  |- library.json (optional. for custom build options, etc) https://docs.platformio.org/page/librarymanager/config.html
+|  |
+|  |--Foo
+|  |  |- Foo.c
+|  |  |- Foo.h
+|  |
+|  |- README --> THIS FILE
+|
+|- platformio.ini
+|--src
+   |- main.c
+
+Example contents of `src/main.c` using Foo and Bar:
+```
+#include <Foo.h>
+#include <Bar.h>
+
+int main (void)
+{
+  ...
+}
+
+```
+
+The PlatformIO Library Dependency Finder will find automatically dependent
+libraries by scanning project source files.
+
+More information about PlatformIO Library Dependency Finder
+- https://docs.platformio.org/page/librarymanager/ldf.html
+
+
+Geração do Engine ID: função que gera um Engine ID único para o seu ESP32. prática comum: usar o endereço MAC do dispositivo.
+
+Geração de Chaves (Password to Key): Implementação do algoritmo password-to-key definido na RFC 3414. Ele usa MD5 ou SHA para transformar as senhas de texto plano dos usuários em chaves de autenticação e privacidade.
+
+O ESP-IDF (que está por baixo do framework Arduino no ESP32) já possui a biblioteca mbedTLS, que tem implementações de MD5 e SHA.
+
+Processo de Autenticação: função que recebe uma mensagem e uma chave de autenticação, calcula o HMAC (HMAC-MD5 ou HMAC-SHA) da mensagem e compara com o msgAuthenticationParameters recebido.
+
+Processo de Criptografia/Decriptografia: funções que usam as chaves de privacidade para criptografar/descriptografar a scopedPDU usando DES ou AES.
+
+TODO: atualizar os seguintes arquivos para receber a USM
+
+~~SNMPPacket.cpp e .h~~
+~~SNMPResponse.cpp e .h~~
+SNMP_Agent.cpp e .h
+~~SNMPPDUHandler.cpp~~
+~~BER.h~~
