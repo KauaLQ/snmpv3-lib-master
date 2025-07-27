@@ -42,6 +42,31 @@ SNMP_ERROR_RESPONSE handlePacket(
     if (request.snmpVersion == SNMP_VERSION_3) {
         SNMP_LOGD("Handling SNMPv3 packet.");
 
+        // <<< ALTERAÇÃO AQUI: Lidar com o pacote de descoberta >>>
+        // Se o msgUserName estiver vazio, é um pacote de descoberta.
+        if (request.securityParameters.msgUserNameLength == 0) {
+            SNMP_LOGD("SNMPv3 Discovery packet received. Sending report.");
+            SNMPResponse response = SNMPResponse(request);
+            
+            // Configura a resposta como um 'report' com o EngineID
+            // Precisaremos de um novo método em SNMPResponse para criar um report,
+            // mas por enquanto, vamos sinalizar o erro de usuário desconhecido, que
+            // já deve ser tratado pela pilha Net-SNMP para gerar um 'report'.
+            response.setGlobalError(UNKNOWN_USER_NAME, 0, true);
+            
+            // A função serialiseIntoV3 precisará ser inteligente para não precisar de um
+            // usuário para gerar um pacote de erro/report.
+            *responseLength = response.serialiseIntoV3(buffer, max_packet_size, usm); // Pode precisar de ajustes
+            
+            if(*responseLength <= 0){
+                SNMP_LOGW("Failed to build discovery report packet");
+                return SNMP_FAILED_SERIALISATION;
+            }
+            
+            // Retornamos um valor positivo para que o loop principal envie o buffer de resposta
+            return SNMP_ERROR_PACKET_SENT;
+        }
+
         // 4a. Encontrar o usuário v3 (com a correção)
         for (int i = 0; i < num_v3_users; i++) {
             // <<< CORREÇÃO 1: Usar memcmp e comparar os comprimentos

@@ -86,24 +86,42 @@ SNMP_PACKET_PARSE_ERROR SNMPPacket::parsePacket(ComplexType *structure, enum SNM
 
             case MSGSECURITYPARAMETERS:
             {
+                // <<< CORREÇÃO COMPLETA DESTA SEÇÃO >>>
                 ASSERT_ASN_TYPE_AT_STATE(value, STRING, MSGSECURITYPARAMETERS);
                 auto secParamsStr = std::static_pointer_cast<OctetType>(value);
-                
-                // Aqui nós apenas armazenamos os bytes dos parâmetros de segurança.
-                // O parser de BER precisa decodificar a estrutura interna deles.
-                // Para simplificar, vamos assumir que a decodificação acontece aqui
-                // ou que o SNMPParser irá decodificar este buffer.
-                // Exemplo simplificado de decodificação:
-                // ComplexType secParams;
-                // secParams.fromBuffer(secParamsStr->get()->_value, secParamsStr->get()->_value.length());
-                // ... e então extrair os campos.
-                // Por agora, vamos apenas guardar para o USM processar.
-                // Nota: Uma implementação real necessitaria de um parser BER completo aqui.
-                
-                // A forma mais robusta é deixar o SNMPParser fazer isso.
-                // Por agora, o código refatorado no SNMPParser já assume que os campos de 
-                // securityParameters são preenchidos. Vamos simular esse preenchimento.
-                // O ideal é que sua lib BER possa parsear essa sub-estrutura.
+
+                // Agora vamos decodificar a estrutura BER que está dentro desta Octet String
+                ComplexType secParamsStructure(STRUCTURE);
+                SNMP_BUFFER_PARSE_ERROR decodeResult = secParamsStructure.fromBuffer((uint8_t*)secParamsStr->_value.data(), secParamsStr->_value.length());
+
+                if (decodeResult <= 0) {
+                    SNMP_LOGW("Falha ao decodificar a estrutura interna dos msgSecurityParameters.");
+                    return SNMP_PARSE_ERROR_AT_STATE(MSGSECURITYPARAMETERS);
+                }
+
+                // Agora, populamos nossa estrutura securityParameters com os valores decodificados
+                auto engID = std::static_pointer_cast<OctetType>(secParamsStructure.values[0]);
+                memcpy(this->securityParameters.msgAuthoritativeEngineID, engID->_value.data(), engID->_value.length());
+                this->securityParameters.msgAuthoritativeEngineIDLength = engID->_value.length();
+
+                this->securityParameters.msgAuthoritativeEngineBoots = std::static_pointer_cast<IntegerType>(secParamsStructure.values[1])->_value;
+                this->securityParameters.msgAuthoritativeEngineTime = std::static_pointer_cast<IntegerType>(secParamsStructure.values[2])->_value;
+
+                auto uName = std::static_pointer_cast<OctetType>(secParamsStructure.values[3]);
+                memcpy(this->securityParameters.msgUserName, uName->_value.data(), uName->_value.length());
+                this->securityParameters.msgUserNameLength = uName->_value.length();
+
+                // Os parâmetros de autenticação e privacidade são opcionais, então verificamos o tamanho
+                if (secParamsStructure.values.size() > 4) {
+                    auto authParams = std::static_pointer_cast<OctetType>(secParamsStructure.values[4]);
+                    memcpy(this->securityParameters.msgAuthenticationParameters, authParams->_value.data(), authParams->_value.length());
+                    this->securityParameters.msgAuthenticationParametersLength = authParams->_value.length();
+                }
+                if (secParamsStructure.values.size() > 5) {
+                    auto privParams = std::static_pointer_cast<OctetType>(secParamsStructure.values[5]);
+                    memcpy(this->securityParameters.msgPrivacyParameters, privParams->_value.data(), privParams->_value.length());
+                    this->securityParameters.msgPrivacyParametersLength = privParams->_value.length();
+                }
                 
                 state = SCOPEDPDU;
                 break;

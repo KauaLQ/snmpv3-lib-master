@@ -76,7 +76,8 @@ typedef enum ERROR_STATUS_WITH_VALUE {
     UNDO_FAILED = 15,
     AUTHORIZATION_ERROR = 16,
     NOT_WRITABLE = 17,
-    INCONSISTENT_NAME = 18
+    INCONSISTENT_NAME = 18,
+    UNKNOWN_USER_NAME = 19 // <<< ADICIONE ESTA LINHA
 } SNMP_ERROR_STATUS;
 
 #define SNMP_V1_MAX_ERROR GEN_ERR
@@ -94,6 +95,7 @@ typedef enum ERROR_STATUS_WITH_VALUE {
 #define RFC1213_OID_sysName             (".1.3.6.1.2.1.1.5.0")
 #define RFC1213_OID_sysLocation         (".1.3.6.1.2.1.1.6.0")
 #define RFC1213_OID_sysServices         (".1.3.6.1.2.1.1.7.0")
+#define OID_usmStatsUnknownUserNames ".1.3.6.1.6.3.15.1.1.2.0" // <<< ADICIONE ESTA LINHA
 
 typedef struct RFC1213SystemStruct {
         char*           sysDescr;               /* .1.3.6.1.2.1.1.1.0   Read-only   */

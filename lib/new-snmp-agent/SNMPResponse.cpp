@@ -32,16 +32,78 @@ bool SNMPResponse::setGlobalError(SNMP_ERROR_STATUS error, int index, int overri
     return true;
 }
 
+// IMPLEMENTAÇÃO FINAL DE buildV3ReportPacket
+int SNMPResponse::buildV3ReportPacket(uint8_t* buf, size_t max_len, USM& usm) {
+    SNMP_LOGD("Building SNMPv3 Report Packet.");
 
-// <<< 3. IMPLEMENTAÇÃO DA FUNÇÃO CENTRAL serialiseIntoV3
-// Esta função orquestra a construção de uma resposta SNMPv3 segura.
+    delete this->packet;
+    this->packet = new ComplexType(STRUCTURE);
+
+    // 1. Versão
+    this->packet->addValueToList(std::make_shared<IntegerType>(SNMP_VERSION_3));
+
+    // 2. Cabeçalho Global (msgGlobalData)
+    auto globalData = std::make_shared<ComplexType>(STRUCTURE);
+    // Para reports, o msgID pode ser 0 ou o da requisição. 0 é mais seguro.
+    globalData->addValueToList(std::make_shared<IntegerType>(0));
+    globalData->addValueToList(std::make_shared<IntegerType>(1500)); // Nosso MaxSize
+    uint8_t msgFlags = 0x04; // Apenas a flag "reportable"
+    globalData->addValueToList(std::make_shared<OctetType>(std::string((char*)&msgFlags, 1)));
+    globalData->addValueToList(std::make_shared<IntegerType>(3)); // USM Security Model
+    this->packet->addValueToList(globalData);
+
+    // 3. Parâmetros de Segurança (msgSecurityParameters) - CRUCIAL para a descoberta
+    // Esta é a informação que o cliente precisa para sincronizar.
+    auto secParamsStruct = std::make_shared<ComplexType>(STRUCTURE);
+    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string((char*)usm.getEngineID(), usm.getEngineIDLength())));
+    secParamsStruct->addValueToList(std::make_shared<IntegerType>(usm.getEngineBoots()));
+    secParamsStruct->addValueToList(std::make_shared<IntegerType>(usm.getEngineTime()));
+    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string("", 0))); // userName vazio
+    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string("", 0))); // auth parameters vazio
+    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string("", 0))); // priv parameters vazio
+
+    uint8_t secParamsBuf[128];
+    int secParamsLen = secParamsStruct->serialise(secParamsBuf, 128);
+    // Os parâmetros de segurança são empacotados como uma Octet String
+    this->packet->addValueToList(std::make_shared<OctetType>(std::string((char*)secParamsBuf, secParamsLen)));
+
+    // 4. ScopedPDU contendo o Report-PDU
+    auto scopedPDU = std::make_shared<ComplexType>(STRUCTURE);
+    scopedPDU->addValueToList(std::make_shared<OctetType>(std::string("", 0))); // contextEngineID vazio
+    scopedPDU->addValueToList(std::make_shared<OctetType>(std::string("", 0))); // contextName vazio
+
+    auto reportPDU = std::make_shared<ComplexType>(ReportPDU);
+    reportPDU->addValueToList(std::make_shared<IntegerType>(0)); // requestID é 0
+    reportPDU->addValueToList(std::make_shared<IntegerType>(NO_ERROR));
+    reportPDU->addValueToList(std::make_shared<IntegerType>(0));
+    auto varBindList = std::make_shared<ComplexType>(STRUCTURE);
+    auto varBind = std::make_shared<ComplexType>(STRUCTURE);
+    varBind->addValueToList(std::make_shared<OIDType>(OID_usmStatsUnknownUserNames));
+    // O valor para este OID é um Counter32 indicando o número de ocorrências
+    varBind->addValueToList(std::make_shared<Counter32>(1));
+    varBindList->addValueToList(varBind);
+    reportPDU->addValueToList(varBindList);
+    scopedPDU->addValueToList(reportPDU);
+    
+    this->packet->addValueToList(scopedPDU);
+
+    // Serializa o pacote completo e retorna
+    return this->packet->serialise(buf, max_len);
+}
+
+
+// IMPLEMENTAÇÃO FINAL DE serialiseIntoV3
 int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
+    if (this->errorStatus.errorStatus == UNKNOWN_USER_NAME) {
+        return this->buildV3ReportPacket(buf, max_len, usm);
+    }
+
     if (!_v3_user) {
-        SNMP_LOGW("Tentativa de serializar pacote v3 sem um usuário definido!");
+        SNMP_LOGW("Tentativa de serializar pacote v3 sem um usuário válido!");
         return -1;
     }
 
-    // --- ETAPA 1: Gerar a ScopedPDU em texto plano ---
+    // --- TÓPICO 1: Gerar a ScopedPDU em texto plano ---
     auto pdu = std::make_shared<ComplexType>(this->packetPDUType);
     pdu->addValueToList(std::make_shared<IntegerType>(this->requestID));
     pdu->addValueToList(std::make_shared<IntegerType>(this->errorStatus.errorStatus));
@@ -49,96 +111,84 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
     pdu->addValueToList(this->generateVarBindList());
 
     auto scopedPDU = std::make_shared<ComplexType>(STRUCTURE);
-    scopedPDU->addValueToList(std::make_shared<OctetType>((char*)usm.getEngineID(), usm.getEngineIDLength())); // contextEngineID
-    scopedPDU->addValueToList(std::make_shared<OctetType>("")); // contextName
+    scopedPDU->addValueToList(std::make_shared<OctetType>(std::string((char*)usm.getEngineID(), usm.getEngineIDLength())));
+    scopedPDU->addValueToList(std::make_shared<OctetType>(std::string("", 0))); // contextName vazio
     scopedPDU->addValueToList(pdu);
 
     uint8_t scopedPDUBuf[512];
     int scopedPDULen = scopedPDU->serialise(scopedPDUBuf, 512);
-    if (scopedPDULen <= 0) {
-        SNMP_LOGW("Falha ao serializar a ScopedPDU!");
-        return -2;
-    }
 
-    // --- ETAPA 2: Criptografar a ScopedPDU, se necessário ---
+    // --- TÓPICO 2: Criptografar a ScopedPDU, se necessário ---
     uint8_t finalScopedPDUBytes[512];
     int finalScopedPDULen = scopedPDULen;
-    
-    uint8_t privacyParameters[8]; // O "salt" para a criptografia
-    for(int i = 0; i < 8; i++) privacyParameters[i] = rand(); // Gera um salt aleatório
+    uint8_t privacyParameters[8] = {0}; // "Salt" para a criptografia
 
     if (_v3_user->securityLevel == AUTH_PRIV) {
-        // A lógica de criptografia precisa que o tamanho do buffer seja múltiplo do bloco (16 para AES)
-        // Você pode precisar adicionar padding aqui se sua lib BER não o fizer.
-        // Assumindo que o comprimento já é válido por enquanto.
-        finalScopedPDULen = usm.encryptPDU(*_v3_user, scopedPDUBuf, scopedPDULen, finalScopedPDUBytes, privacyParameters);
-        if (finalScopedPDULen <= 0) {
-            SNMP_LOGW("Falha ao criptografar a ScopedPDU!");
-            return -3;
+        // Gera um "salt" aleatório para o IV da criptografia
+        for(int i = 0; i < 8; i++) {
+            privacyParameters[i] = rand();
         }
+        finalScopedPDULen = usm.encryptPDU(*_v3_user, scopedPDUBuf, scopedPDULen, finalScopedPDUBytes, privacyParameters);
     } else {
         memcpy(finalScopedPDUBytes, scopedPDUBuf, scopedPDULen);
     }
 
-    // --- ETAPA 3: Construir o pacote v3 completo ---
+    if (finalScopedPDULen <= 0 && _v3_user->securityLevel == AUTH_PRIV) {
+        SNMP_LOGW("Falha ao criptografar PDU!");
+        return -1;
+    }
+
+    // --- TÓPICO 3: Construir o pacote v3 completo (com cabeçalhos) ---
     delete this->packet;
     this->packet = new ComplexType(STRUCTURE);
 
-    // Versão
     this->packet->addValueToList(std::make_shared<IntegerType>(SNMP_VERSION_3));
 
-    // msgGlobalData
+    // Construir msgGlobalData
     auto globalData = std::make_shared<ComplexType>(STRUCTURE);
-    globalData->addValueToList(std::make_shared<IntegerType>(this->requestID)); // msgID (deve ser o mesmo da requisição)
-    globalData->addValueToList(std::make_shared<IntegerType>(1500)); // msgMaxSize
-    uint8_t msgFlags = 0;
-    if (_v3_user->securityLevel == AUTH_NO_PRIV) msgFlags = 0x01; // authFlag
-    if (_v3_user->securityLevel == AUTH_PRIV) msgFlags = 0x03;    // authFlag | privFlag
-    globalData->addValueToList(std::make_shared<OctetType>((char*)&msgFlags, 1)); // msgFlags
-    globalData->addValueToList(std::make_shared<IntegerType>(3)); // msgSecurityModel (USM)
+    globalData->addValueToList(std::make_shared<IntegerType>(this->requestID));
+    globalData->addValueToList(std::make_shared<IntegerType>(1500)); // Nosso MaxSize
+    uint8_t msgFlags = (_v3_user->securityLevel == AUTH_PRIV) ? 0x03 : 0x01; // authFlag | privFlag
+    msgFlags |= 0x04; // Adiciona a flag 'reportable'
+    globalData->addValueToList(std::make_shared<OctetType>(std::string((char*)&msgFlags, 1)));
+    globalData->addValueToList(std::make_shared<IntegerType>(3)); // USM Security Model
     this->packet->addValueToList(globalData);
 
-    // msgSecurityParameters
-    auto secParams = std::make_shared<ComplexType>(STRUCTURE);
-    secParams->addValueToList(std::make_shared<OctetType>((char*)usm.getEngineID(), usm.getEngineIDLength()));
-    secParams->addValueToList(std::make_shared<IntegerType>(usm.getEngineBoots()));
-    secParams->addValueToList(std::make_shared<IntegerType>(usm.getEngineTime()));
-    secParams->addValueToList(std::make_shared<OctetType>(_v3_user->userName));
-    secParams->addValueToList(std::make_shared<OctetType>("", 0)); // auth parameters (será preenchido depois)
-    secParams->addValueToList(std::make_shared<OctetType>((char*)privacyParameters, _v3_user->securityLevel == AUTH_PRIV ? 8 : 0)); // priv parameters
-    
-    uint8_t secParamsBuf[256];
-    int secParamsLen = secParams->serialise(secParamsBuf, 256);
-    this->packet->addValueToList(std::make_shared<OctetType>((char*)secParamsBuf, secParamsLen));
+    // Construir msgSecurityParameters
+    uint8_t authParamPlaceholder[12] = {0}; // Placeholder para o HMAC
+    auto authParamPtr = std::make_shared<OctetType>(std::string((char*)authParamPlaceholder, 12));
 
-    // ScopedPDU (criptografada ou não)
-    this->packet->addValueToList(std::make_shared<OctetType>((char*)finalScopedPDUBytes, finalScopedPDULen));
+    auto secParamsStruct = std::make_shared<ComplexType>(STRUCTURE);
+    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string((char*)usm.getEngineID(), usm.getEngineIDLength())));
+    secParamsStruct->addValueToList(std::make_shared<IntegerType>(usm.getEngineBoots()));
+    secParamsStruct->addValueToList(std::make_shared<IntegerType>(usm.getEngineTime()));
+    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string(_v3_user->userName)));
+    secParamsStruct->addValueToList(authParamPtr); // Adiciona o placeholder
+    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string((char*)privacyParameters, _v3_user->securityLevel == AUTH_PRIV ? 8 : 0)));
 
+    uint8_t secParamsBuf[128];
+    int secParamsLen = secParamsStruct->serialise(secParamsBuf, 128);
+    this->packet->addValueToList(std::make_shared<OctetType>(std::string((char*)secParamsBuf, secParamsLen)));
 
-    // --- ETAPA 4: Serializar e Autenticar ---
-    // Serializa o pacote inteiro para um buffer temporário para que o HMAC possa ser calculado
-    uint8_t finalPacketBuf[1500];
-    int finalPacketLen = this->packet->serialise(finalPacketBuf, 1500);
-    if (finalPacketLen <= 0) {
-        SNMP_LOGW("Falha ao serializar o pacote v3 final!");
-        return -4;
-    }
+    // Adicionar ScopedPDU (criptografada ou não)
+    this->packet->addValueToList(std::make_shared<OctetType>(std::string((char*)finalScopedPDUBytes, finalScopedPDULen)));
 
-    // Autentica o pacote inteiro. O USM irá inserir o HMAC no lugar correto.
-    // Para isso, precisamos encontrar o ponteiro para o campo authParameters dentro do buffer final.
-    // Esta é a parte mais delicada. Uma forma é reconstruir o pacote com o HMAC.
-    // A forma mais simples é recalcular a posição.
+    // --- TÓPICOS 4 & 5: Serializar e Autenticar ---
+    // Serializa o pacote com o placeholder de autenticação zerado
+    int finalPacketLen = this->packet->serialise(buf, max_len);
+
     if (_v3_user->securityLevel >= AUTH_NO_PRIV) {
-        // ... Lógica para encontrar o ponteiro para authParameters dentro de finalPacketBuf ...
-        // Este passo é avançado. Uma implementação completa requer uma busca pelo padrão
-        // ou um recálculo cuidadoso dos comprimentos BER.
-        // Por enquanto, vamos assumir que a autenticação funciona no buffer completo
-        // e que o USM sabe como substituir o valor.
+        // O USM calcula o HMAC sobre todo o buffer serializado
+        uint8_t hmac_result[20]; // SHA pode ter até 20 bytes
+        usm.authenticateOutgoingMsg(*_v3_user, buf, finalPacketLen, hmac_result);
+
+        // Agora, precisamos sobrescrever o placeholder no buffer final com o HMAC real.
+        // Esta é a parte mais delicada. Uma forma robusta é modificar o objeto em memória e reserializar.
+        authParamPtr->_value = std::string((char*)hmac_result, 12);
         
-        // usm.authenticateOutgoingMsg(*_v3_user, finalPacketBuf, finalPacketLen, authParamsPtr);
+        // Reserializa o pacote AGORA COM O HMAC CORRETO no lugar do placeholder
+        finalPacketLen = this->packet->serialise(buf, max_len);
     }
     
-    // Copia o buffer final e autenticado para o buffer de saída do usuário.
-    memcpy(buf, finalPacketBuf, finalPacketLen);
     return finalPacketLen;
 }

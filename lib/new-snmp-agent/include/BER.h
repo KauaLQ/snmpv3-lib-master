@@ -54,12 +54,13 @@ typedef enum ASN_TYPE_WITH_VALUE {
     TrapPDU = 0xA4,
     GetBulkRequestPDU = 0xA5,
     InformRequestPDU = 0xA6,
-    Trapv2PDU = 0xA7
+    Trapv2PDU = 0xA7,
+    ReportPDU = 0xA8 // <<< ADICIONE ESTA LINHA
     
 } ASN_TYPE;
 
 #define ASN_PDU_TYPE_MIN_VALUE GetRequestPDU
-#define ASN_PDU_TYPE_MAX_VALUE Trapv2PDU
+#define ASN_PDU_TYPE_MAX_VALUE ReportPDU
 
 #define MAX_DYNAMIC_ASN_TYPE COUNTER64
 

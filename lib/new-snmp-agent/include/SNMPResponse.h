@@ -35,6 +35,7 @@ class SNMPResponse : public SNMPPacket {
   // Em SNMPResponse.h, dentro da classe
   private:
     SNMPV3User* _v3_user = nullptr;
+    int buildV3ReportPacket(uint8_t* buf, size_t max_len, USM& usm); // Função auxiliar para construir o pacote de report
 };
 
 #endif
