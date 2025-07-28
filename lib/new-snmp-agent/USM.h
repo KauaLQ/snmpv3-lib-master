@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 
+class SNMPV3SecurityParameters;  // 👈 só avisa que a struct existe
+
 // É uma boa prática mover estas definições para um arquivo de definições global (ex: defs.h)
 // mas por enquanto, deixamos aqui para que o módulo USM seja autossuficiente.
 enum SNMPV3SecurityLevel {
@@ -50,13 +52,20 @@ public:
 
     // Funções de autenticação
     bool authenticateOutgoingMsg(const SNMPV3User& user, byte* packet, uint16_t packet_len, byte* auth_params_ptr);
-    bool authenticateIncomingMsg(const SNMPV3User& user, const byte* packet, uint16_t packet_len, const byte* received_auth_params);
+
+    // Assinatura antiga: (..., const byte* packet, ..., const byte* received_auth_params)
+    // Assinatura NOVA:
+    bool authenticateIncomingMsg(const SNMPV3User& user, const SNMPV3SecurityParameters& params, const byte* packet, uint16_t packet_len);
 
     // Funções de privacidade (Criptografia)
     // Retorna o novo tamanho dos dados criptografados
-    int encryptPDU(const SNMPV3User& user, const byte* pdu, uint16_t pdu_len, byte* encrypted_pdu, const byte* privacy_params);
+    // Assinatura antiga: (..., const byte* privacy_params)
+    // Assinatura NOVA:
+    int encryptPDU(const SNMPV3User& user, const byte* pdu, uint16_t pdu_len, byte* encrypted_pdu, byte* out_privacy_params);
     // Retorna o novo tamanho dos dados descriptografados
-    int decryptPDU(const SNMPV3User& user, const byte* encrypted_pdu, uint16_t encrypted_len, byte* decrypted_pdu, const byte* privacy_params);
+    // Assinatura antiga: (..., const byte* privacy_params)
+    // Assinatura NOVA:
+    int decryptPDU(const SNMPV3User& user, const byte* encrypted_pdu, uint16_t encrypted_len, byte* decrypted_pdu, const SNMPV3SecurityParameters& params);
 
 
 private:
@@ -66,7 +75,8 @@ private:
     uint32_t _startTime; // Tempo de boot em segundos
 
     // Função auxiliar para o algoritmo passwordToKey
-    void _expandPassword(const char* password, byte* buf);
+    // void _expandPassword(const char* password, byte* buf);
+    uint64_t _privSaltCounter = 0; // <<< ADICIONE ESTA LINHA
 };
 
 #endif // USM_H

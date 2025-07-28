@@ -1,4 +1,5 @@
 #include "USM.h"
+#include "SNMPPacket.h" // Para acessar SNMPV3SecurityParameters
 #include <WiFi.h> // Para obter o endereço MAC
 
 // Includes da mbedTLS
@@ -158,9 +159,21 @@ bool USM::authenticateOutgoingMsg(const SNMPV3User& user, byte* packet, uint16_t
 }
 
 // Autentica uma mensagem RECEBIDA
-bool USM::authenticateIncomingMsg(const SNMPV3User& user, const byte* packet, uint16_t packet_len, const byte* received_auth_params) {
+bool USM::authenticateIncomingMsg(const SNMPV3User& user, const SNMPV3SecurityParameters& params, const byte* packet, uint16_t packet_len) {
     if (user.securityLevel == NO_AUTH_NO_PRIV) return true;
 
+    // 1. VERIFICAÇÃO DA JANELA DE TEMPO (Time Window) - PONTO CRÍTICO FALTANTE
+    // Garante que a mensagem não é uma repetição ou muito antiga.
+    if (params.msgAuthoritativeEngineBoots != this->_engineBoots) {
+        Serial.println("Authentication failed: EngineBoots mismatch.");
+        return false; // Fora da janela de tempo
+    }
+    if (abs((long)this->getEngineTime() - (long)params.msgAuthoritativeEngineTime) > 150) {
+        Serial.println("Authentication failed: Message out of time window.");
+        return false; // Fora da janela de tempo (150 segundos)
+    }
+
+    // 2. VERIFICAÇÃO DO HMAC (lógica existente, mas agora confirmada após o time window)
     const mbedtls_md_info_t* md_info;
     int hash_size;
     if (user.authProtocol == AUTH_PROTOCOL_SHA) {
@@ -170,97 +183,86 @@ bool USM::authenticateIncomingMsg(const SNMPV3User& user, const byte* packet, ui
         md_info = mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
         hash_size = 16;
     }
-    
-    // Cria uma cópia do pacote para zerar o campo de autenticação
+
     byte* temp_packet = (byte*)malloc(packet_len);
     if (!temp_packet) return false;
     memcpy(temp_packet, packet, packet_len);
 
-    // Calcula a posição do auth_params dentro da cópia do pacote
-    int auth_params_offset = received_auth_params - packet;
+    // O ponteiro para os parâmetros de autenticação no buffer é calculado pelo offset
+    int auth_params_offset = params.msgAuthenticationParameters - packet;
     memset(temp_packet + auth_params_offset, 0, 12);
-    
+
     byte calculated_hmac[MBEDTLS_MD_MAX_SIZE];
     mbedtls_md_hmac(md_info, user.authKey, hash_size, temp_packet, packet_len, calculated_hmac);
-
     free(temp_packet);
 
-    // Compara o HMAC calculado com o recebido
-    if (memcmp(calculated_hmac, received_auth_params, 12) == 0) {
+    if (memcmp(calculated_hmac, params.msgAuthenticationParameters, 12) == 0) {
         Serial.println("Authentication successful.");
         return true;
     } else {
-        Serial.println("Authentication failed!");
+        Serial.println("Authentication failed: Wrong Digest (HMAC).");
         return false;
     }
 }
 
 // Criptografa uma PDU
-int USM::encryptPDU(const SNMPV3User& user, const byte* pdu, uint16_t pdu_len, byte* encrypted_pdu, const byte* privacy_params) {
+int USM::encryptPDU(const SNMPV3User& user, const byte* pdu, uint16_t pdu_len, byte* encrypted_pdu, byte* out_privacy_params) {
     if (user.securityLevel != AUTH_PRIV) return 0;
 
     if (user.privProtocol == PRIV_PROTOCOL_AES) {
-        mbedtls_aes_context aes_ctx;
-        byte iv[16];
-
-        // Constrói o IV (Vetor de Inicialização) para AES-128
-        // IV = engineBoots (4 bytes) + engineTime (4 bytes) + privacyParams (8 bytes)
-        uint32_t boots = htonl(getEngineBoots());
-        uint32_t time = htonl(getEngineTime());
-        memcpy(iv, &boots, 4);
-        memcpy(iv + 4, &time, 4);
-        memcpy(iv + 8, privacy_params, 8);
-
-        mbedtls_aes_init(&aes_ctx);
-        mbedtls_aes_setkey_enc(&aes_ctx, user.privKey, 128); // AES-128
-
-        // O comprimento da PDU a ser criptografada DEVE ser um múltiplo de 16 (tamanho do bloco AES)
-        // A sua lógica de codificação BER da PDU precisa garantir isso, adicionando padding se necessário.
-        if (pdu_len % 16 != 0) {
-            Serial.println("Error: PDU length for AES encryption is not a multiple of 16.");
-            return -1;
+        // 1. GERAR O "SALT" (privacy_params) - PONTO CRÍTICO FALTANTE
+        uint64_t salt = ++_privSaltCounter;
+        for (int i = 0; i < 8; i++) {
+            out_privacy_params[7 - i] = (salt >> (i * 8)) & 0xFF;
         }
-
-        mbedtls_aes_crypt_cbc(&aes_ctx, MBEDTLS_AES_ENCRYPT, pdu_len, iv, pdu, encrypted_pdu);
-        mbedtls_aes_free(&aes_ctx);
         
-        return pdu_len;
+        // 2. CONSTRUIR O VETOR DE INICIALIZAÇÃO (IV) - CORREÇÃO CRÍTICA
+        // IV (16 bytes) = engineBoots(4) || engineTime(4) || privParams(8)
+        uint8_t iv[16];
+        uint32_t boots_n = htonl(this->_engineBoots);
+        uint32_t time_n = htonl(this->getEngineTime());
+        memcpy(iv, &boots_n, 4);
+        memcpy(iv + 4, &time_n, 4);
+        memcpy(iv + 8, out_privacy_params, 8);
+
+        // 3. USAR AES-CFB-128 (NÃO CBC) - CORREÇÃO CRÍTICA
+        mbedtls_aes_context aes_ctx;
+        mbedtls_aes_init(&aes_ctx);
+        mbedtls_aes_setkey_enc(&aes_ctx, user.privKey, 128);
+
+        size_t iv_off = 0; // mbedtls gerencia o offset do IV
+        mbedtls_aes_crypt_cfb128(&aes_ctx, MBEDTLS_AES_ENCRYPT, pdu_len, &iv_off, iv, pdu, encrypted_pdu);
+        
+        mbedtls_aes_free(&aes_ctx);
+        return pdu_len; // CFB não usa padding, o tamanho de saída é igual ao de entrada
     }
-    // TODO: Adicionar implementação para DES se for necessário
-    // else if (user.privProtocol == PRIV_PROTOCOL_DES) { ... }
-    
     return 0;
 }
 
 // Descriptografa uma PDU
-int USM::decryptPDU(const SNMPV3User& user, const byte* encrypted_pdu, uint16_t encrypted_len, byte* decrypted_pdu, const byte* privacy_params) {
+int USM::decryptPDU(const SNMPV3User& user, const byte* encrypted_pdu, uint16_t encrypted_len, byte* decrypted_pdu, const SNMPV3SecurityParameters& params) {
     if (user.securityLevel != AUTH_PRIV) return 0;
 
     if (user.privProtocol == PRIV_PROTOCOL_AES) {
-        mbedtls_aes_context aes_ctx;
-        byte iv[16];
-
-        // Constrói o IV da mesma forma que na criptografia
-        uint32_t boots = htonl(_engineBoots); // Usar os dados do pacote recebido
-        uint32_t time = htonl(getEngineTime()); // Usar os dados do pacote recebido
-        memcpy(iv, &boots, 4);
-        memcpy(iv + 4, &time, 4);
-        memcpy(iv + 8, privacy_params, 8);
-
-        mbedtls_aes_init(&aes_ctx);
-        mbedtls_aes_setkey_dec(&aes_ctx, user.privKey, 128);
-
-        if (encrypted_len % 16 != 0) {
-            Serial.println("Error: Encrypted data length for AES decryption is not a multiple of 16.");
-            return -1;
-        }
-
-        mbedtls_aes_crypt_cbc(&aes_ctx, MBEDTLS_AES_DECRYPT, encrypted_len, iv, encrypted_pdu, decrypted_pdu);
-        mbedtls_aes_free(&aes_ctx);
+        // 1. CONSTRUIR O VETOR DE INICIALIZAÇÃO (IV) - CORREÇÃO CRÍTICA
+        // Para descriptografar, usamos os valores que vieram no pacote
+        uint8_t iv[16];
+        uint32_t boots_n = htonl(params.msgAuthoritativeEngineBoots);
+        uint32_t time_n = htonl(params.msgAuthoritativeEngineTime);
+        memcpy(iv, &boots_n, 4);
+        memcpy(iv + 4, &time_n, 4);
+        memcpy(iv + 8, params.msgPrivacyParameters, 8);
         
+        // 2. USAR AES-CFB-128 (NÃO CBC) - CORREÇÃO CRÍTICA
+        mbedtls_aes_context aes_ctx;
+        mbedtls_aes_init(&aes_ctx);
+        mbedtls_aes_setkey_enc(&aes_ctx, user.privKey, 128); // CFB usa a chave de encriptação para ambos os modos
+
+        size_t iv_off = 0;
+        mbedtls_aes_crypt_cfb128(&aes_ctx, MBEDTLS_AES_DECRYPT, encrypted_len, &iv_off, iv, encrypted_pdu, decrypted_pdu);
+        
+        mbedtls_aes_free(&aes_ctx);
         return encrypted_len;
     }
-    // TODO: Adicionar implementação para DES
-    
     return 0;
 }

@@ -32,54 +32,57 @@ bool SNMPResponse::setGlobalError(SNMP_ERROR_STATUS error, int index, int overri
     return true;
 }
 
-// IMPLEMENTAÇÃO FINAL DE buildV3ReportPacket
+// <<< IMPLEMENTAÇÃO FINAL E GENERALIZADA DE buildV3ReportPacket >>>
 int SNMPResponse::buildV3ReportPacket(uint8_t* buf, size_t max_len, USM& usm) {
-    SNMP_LOGD("Building SNMPv3 Report Packet.");
+    SNMP_LOGD("Building SNMPv3 Report Packet. Reason: %d", this->errorStatus.errorStatus);
 
     delete this->packet;
     this->packet = new ComplexType(STRUCTURE);
-
+    
     // 1. Versão
     this->packet->addValueToList(std::make_shared<IntegerType>(SNMP_VERSION_3));
 
-    // 2. Cabeçalho Global (msgGlobalData)
+    // 2. Cabeçalho Global
     auto globalData = std::make_shared<ComplexType>(STRUCTURE);
-    // Para reports, o msgID pode ser 0 ou o da requisição. 0 é mais seguro.
-    globalData->addValueToList(std::make_shared<IntegerType>(0));
-    globalData->addValueToList(std::make_shared<IntegerType>(1500)); // Nosso MaxSize
+    globalData->addValueToList(std::make_shared<IntegerType>(this->requestID)); 
+    globalData->addValueToList(std::make_shared<IntegerType>(1500));
     uint8_t msgFlags = 0x04; // Apenas a flag "reportable"
     globalData->addValueToList(std::make_shared<OctetType>(std::string((char*)&msgFlags, 1)));
-    globalData->addValueToList(std::make_shared<IntegerType>(3)); // USM Security Model
+    globalData->addValueToList(std::make_shared<IntegerType>(3));
     this->packet->addValueToList(globalData);
 
-    // 3. Parâmetros de Segurança (msgSecurityParameters) - CRUCIAL para a descoberta
-    // Esta é a informação que o cliente precisa para sincronizar.
+    // 3. Parâmetros de Segurança
     auto secParamsStruct = std::make_shared<ComplexType>(STRUCTURE);
     secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string((char*)usm.getEngineID(), usm.getEngineIDLength())));
     secParamsStruct->addValueToList(std::make_shared<IntegerType>(usm.getEngineBoots()));
     secParamsStruct->addValueToList(std::make_shared<IntegerType>(usm.getEngineTime()));
-    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string("", 0))); // userName vazio
-    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string("", 0))); // auth parameters vazio
-    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string("", 0))); // priv parameters vazio
-
+    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string("", 0)));
+    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string("", 0)));
+    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string("", 0)));
+    
     uint8_t secParamsBuf[128];
     int secParamsLen = secParamsStruct->serialise(secParamsBuf, 128);
-    // Os parâmetros de segurança são empacotados como uma Octet String
     this->packet->addValueToList(std::make_shared<OctetType>(std::string((char*)secParamsBuf, secParamsLen)));
 
     // 4. ScopedPDU contendo o Report-PDU
     auto scopedPDU = std::make_shared<ComplexType>(STRUCTURE);
-    scopedPDU->addValueToList(std::make_shared<OctetType>(std::string("", 0))); // contextEngineID vazio
-    scopedPDU->addValueToList(std::make_shared<OctetType>(std::string("", 0))); // contextName vazio
+    scopedPDU->addValueToList(std::make_shared<OctetType>(std::string("", 0)));
+    scopedPDU->addValueToList(std::make_shared<OctetType>(std::string("", 0)));
 
     auto reportPDU = std::make_shared<ComplexType>(ReportPDU);
-    reportPDU->addValueToList(std::make_shared<IntegerType>(0)); // requestID é 0
+    reportPDU->addValueToList(std::make_shared<IntegerType>(0));
     reportPDU->addValueToList(std::make_shared<IntegerType>(NO_ERROR));
     reportPDU->addValueToList(std::make_shared<IntegerType>(0));
+    
     auto varBindList = std::make_shared<ComplexType>(STRUCTURE);
     auto varBind = std::make_shared<ComplexType>(STRUCTURE);
-    varBind->addValueToList(std::make_shared<OIDType>(OID_usmStatsUnknownUserNames));
-    // O valor para este OID é um Counter32 indicando o número de ocorrências
+    
+    // <<< LÓGICA GENERALIZADA: ESCOLHE O OID CORRETO PARA O REPORT >>>
+    if (this->errorStatus.errorStatus == UNKNOWN_USER_NAME) {
+        varBind->addValueToList(std::make_shared<OIDType>(OID_usmStatsUnknownUserNames));
+    } else { // ENGINE_DISCOVERY_REPORT
+        varBind->addValueToList(std::make_shared<OIDType>(OID_usmStatsUnknownEngineIDs));
+    }
     varBind->addValueToList(std::make_shared<Counter32>(1));
     varBindList->addValueToList(varBind);
     reportPDU->addValueToList(varBindList);
@@ -87,17 +90,18 @@ int SNMPResponse::buildV3ReportPacket(uint8_t* buf, size_t max_len, USM& usm) {
     
     this->packet->addValueToList(scopedPDU);
 
-    // Serializa o pacote completo e retorna
     return this->packet->serialise(buf, max_len);
 }
 
 
-// IMPLEMENTAÇÃO FINAL DE serialiseIntoV3
+// <<< IMPLEMENTAÇÃO FINAL DE serialiseIntoV3 >>>
 int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
-    if (this->errorStatus.errorStatus == UNKNOWN_USER_NAME) {
+    // Verifica se precisa construir um pacote de Report
+    if (this->errorStatus.errorStatus == UNKNOWN_USER_NAME || this->errorStatus.errorStatus == ENGINE_DISCOVERY_REPORT) {
         return this->buildV3ReportPacket(buf, max_len, usm);
     }
-
+    
+    // Se não for um report, continua com a lógica normal
     if (!_v3_user) {
         SNMP_LOGW("Tentativa de serializar pacote v3 sem um usuário válido!");
         return -1;
@@ -124,10 +128,8 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
     uint8_t privacyParameters[8] = {0}; // "Salt" para a criptografia
 
     if (_v3_user->securityLevel == AUTH_PRIV) {
-        // Gera um "salt" aleatório para o IV da criptografia
-        for(int i = 0; i < 8; i++) {
-            privacyParameters[i] = rand();
-        }
+        // <<< ALTERE ESTA CHAMADA >>>
+        // Agora a função preenche o privacyParameters (salt) para nós
         finalScopedPDULen = usm.encryptPDU(*_v3_user, scopedPDUBuf, scopedPDULen, finalScopedPDUBytes, privacyParameters);
     } else {
         memcpy(finalScopedPDUBytes, scopedPDUBuf, scopedPDULen);

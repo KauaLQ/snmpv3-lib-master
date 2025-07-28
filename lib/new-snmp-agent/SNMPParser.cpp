@@ -16,7 +16,6 @@ static SNMP_PERMISSION getPermissionOfRequest(const SNMPPacket& request, const s
     return requestPermission;
 }
 
-
 // <<< 2. A FUNÇÃO handlePacket PRECISA SER ATUALIZADA
 SNMP_ERROR_RESPONSE handlePacket(
     uint8_t* buffer, int packetLength, int* responseLength, int max_packet_size, 
@@ -39,82 +38,93 @@ SNMP_ERROR_RESPONSE handlePacket(
     SNMPV3User* requestUser = nullptr;
     SNMP_PERMISSION requestPermission = SNMP_PERM_NONE;
 
-    if (request.snmpVersion == SNMP_VERSION_3) {
+        if (request.snmpVersion == SNMP_VERSION_3) {
         SNMP_LOGD("Handling SNMPv3 packet.");
 
-        // <<< ALTERAÇÃO AQUI: Lidar com o pacote de descoberta >>>
-        // Se o msgUserName estiver vazio, é um pacote de descoberta.
-        if (request.securityParameters.msgUserNameLength == 0) {
-            SNMP_LOGD("SNMPv3 Discovery packet received. Sending report.");
-            SNMPResponse response = SNMPResponse(request);
+        // 1. VERIFICAÇÃO DE DESCOBERTA DE ENGINE ID
+        // Checa se o EngineID no pacote está vazio OU se não bate com o nosso.
+        // Ambos os casos exigem um Report como resposta.
+        if (request.securityParameters.msgAuthoritativeEngineIDLength == 0 ||
+            memcmp(request.securityParameters.msgAuthoritativeEngineID, usm.getEngineID(), usm.getEngineIDLength()) != 0) {
             
-            // Configura a resposta como um 'report' com o EngineID
-            // Precisaremos de um novo método em SNMPResponse para criar um report,
-            // mas por enquanto, vamos sinalizar o erro de usuário desconhecido, que
-            // já deve ser tratado pela pilha Net-SNMP para gerar um 'report'.
-            response.setGlobalError(UNKNOWN_USER_NAME, 0, true);
+            SNMP_LOGD("Engine Discovery request or Mismatched EngineID. Sending report.");
+            SNMPResponse response(request);
             
-            // A função serialiseIntoV3 precisará ser inteligente para não precisar de um
-            // usuário para gerar um pacote de erro/report.
-            *responseLength = response.serialiseIntoV3(buffer, max_packet_size, usm); // Pode precisar de ajustes
+            // Sinaliza para a SNMPResponse construir um report de descoberta de engine
+            response.setGlobalError(ENGINE_DISCOVERY_REPORT, 0, true);
+            
+            *responseLength = response.serialiseIntoV3(buffer, max_packet_size, usm);
             
             if(*responseLength <= 0){
-                SNMP_LOGW("Failed to build discovery report packet");
+                SNMP_LOGW("Failed to build engine discovery report packet");
                 return SNMP_FAILED_SERIALISATION;
             }
+            // Retorna um valor positivo para que o loop principal envie a resposta
+            return SNMP_ERROR_PACKET_SENT;
+        }
+        
+        // 2. VERIFICAÇÃO DE DESCOBERTA DE USUÁRIO
+        // Se o EngineID bateu, mas o usuário veio vazio, é uma descoberta de usuário.
+        if (request.securityParameters.msgUserNameLength == 0) {
+            SNMP_LOGD("User Discovery packet received. Sending report.");
+            SNMPResponse response(request);
+
+            // Sinaliza para a SNMPResponse construir um report de usuário desconhecido
+            response.setGlobalError(UNKNOWN_USER_NAME, 0, true);
             
-            // Retornamos um valor positivo para que o loop principal envie o buffer de resposta
+            *responseLength = response.serialiseIntoV3(buffer, max_packet_size, usm);
+            
+            if(*responseLength <= 0){
+                SNMP_LOGW("Failed to build user discovery report packet");
+                return SNMP_FAILED_SERIALISATION;
+            }
             return SNMP_ERROR_PACKET_SENT;
         }
 
-        // 4a. Encontrar o usuário v3 (com a correção)
+        // 3. PACOTE NORMAL - AUTENTICAÇÃO E PROCESSAMENTO
+        // Se chegamos aqui, o EngineID bateu e temos um nome de usuário.
+        // Encontrar o usuário v3
         for (int i = 0; i < num_v3_users; i++) {
-            // <<< CORREÇÃO 1: Usar memcmp e comparar os comprimentos
             if (strlen(v3_users[i].userName) == request.securityParameters.msgUserNameLength &&
                 memcmp(v3_users[i].userName, request.securityParameters.msgUserName, request.securityParameters.msgUserNameLength) == 0) {
                 requestUser = &v3_users[i];
                 break;
             }
         }
+        
         if (!requestUser) {
-            // NOTE: A conversão para const char* aqui é apenas para logging e pode ser arriscada se não houver um terminador nulo.
-            // Uma forma mais segura seria imprimir os bytes em hexadecimal.
-            SNMP_LOGW("SNMPv3 User not found."); 
-            return SNMP_REQUEST_INVALID_COMMUNITY; 
+            SNMP_LOGW("SNMPv3 User not found: %s", request.securityParameters.msgUserName);
+            // Este caso agora é menos provável de acontecer se o cliente for compatível,
+            // mas mantemos como segurança.
+            return SNMP_REQUEST_INVALID_COMMUNITY;
         }
 
-        // 4b. Autenticar a mensagem usando o USM
-        if (!usm.authenticateIncomingMsg(*requestUser, buffer, packetLength, request.securityParameters.msgAuthenticationParameters)) {
+        // Autenticar e Descriptografar (lógica que já tínhamos)
+        if (!usm.authenticateIncomingMsg(*requestUser, request.securityParameters, buffer, packetLength)) {
             SNMP_LOGW("SNMPv3 Authentication failed for user %s.", requestUser->userName);
             return SNMP_REQUEST_INVALID_COMMUNITY;
         }
 
-        // 4c. Descriptografar a PDU se necessário
         if (requestUser->securityLevel == AUTH_PRIV) {
-            byte decryptedPDU[256]; 
-
-            // <<< CORREÇÃO 2: Acessar a PDU e seu comprimento através do scopedPDUPtr
+            byte decryptedPDU[512]; 
             if (request.scopedPDUPtr) {
                 int decryptedPDULen = usm.decryptPDU(*requestUser, 
-                                                    (const uint8_t*)request.scopedPDUPtr->_value.data(), // Ponteiro para os dados
-                                                    request.scopedPDUPtr->_value.length(), // Comprimento
+                                                    (const uint8_t*)request.scopedPDUPtr->_value.data(),
+                                                    request.scopedPDUPtr->_value.length(),
                                                     decryptedPDU, 
-                                                    request.securityParameters.msgPrivacyParameters);
-
+                                                    request.securityParameters);
                 if (decryptedPDULen <= 0) {
                     SNMP_LOGW("SNMPv3 Decryption failed.");
                     return SNMP_REQUEST_INVALID;
                 }
-                // Analisa a PDU interna que agora está em texto plano
                 request.parseScopedPDU(decryptedPDU, decryptedPDULen);
-
             } else {
                  SNMP_LOGW("AUTH_PRIV packet but no ScopedPDU found to decrypt.");
                  return SNMP_REQUEST_INVALID;
             }
         }
 
-        // 4d. Determinar permissões com base no usuário v3
+        // Determinar permissões
         if (request.packetPDUType == SetRequestPDU) {
             requestPermission = SNMP_PERM_READ_WRITE;
         } else {

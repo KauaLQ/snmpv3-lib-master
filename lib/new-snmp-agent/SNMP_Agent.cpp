@@ -55,6 +55,7 @@ SNMP_ERROR_RESPONSE SNMPAgent::loop(){
 
                 if(!udp->endPacket()){
                     SNMP_LOGW("Failed to send response packet\n");
+                    Serial.println("Failed to send response packet");
                 }
             }
 

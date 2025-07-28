@@ -31,10 +31,11 @@ typedef unsigned long snmp_request_id_t;
 
 
 typedef enum SnmpVersionEnum {
-    SNMP_VERSION_1,
-    SNMP_VERSION_2C,
-    SNMP_VERSION_3,
-    SNMP_VERSION_MAX
+    SNMP_VERSION_1 = 0,
+    SNMP_VERSION_2C = 1,
+    // A versão 2 foi usada pelo SNMPv2u, que é obsoleto.
+    SNMP_VERSION_3 = 3,  // <<< CORREÇÃO: Atribuir explicitamente o valor 3
+    SNMP_VERSION_MAX     // Este agora terá o valor 4, o que torna a verificação correta
 } SNMP_VERSION;
 
 typedef enum {
@@ -77,7 +78,8 @@ typedef enum ERROR_STATUS_WITH_VALUE {
     AUTHORIZATION_ERROR = 16,
     NOT_WRITABLE = 17,
     INCONSISTENT_NAME = 18,
-    UNKNOWN_USER_NAME = 19 // <<< ADICIONE ESTA LINHA
+    UNKNOWN_USER_NAME = 19, // <<< ADICIONE ESTA LINHA
+    ENGINE_DISCOVERY_REPORT = 20
 } SNMP_ERROR_STATUS;
 
 #define SNMP_V1_MAX_ERROR GEN_ERR
@@ -96,6 +98,7 @@ typedef enum ERROR_STATUS_WITH_VALUE {
 #define RFC1213_OID_sysLocation         (".1.3.6.1.2.1.1.6.0")
 #define RFC1213_OID_sysServices         (".1.3.6.1.2.1.1.7.0")
 #define OID_usmStatsUnknownUserNames ".1.3.6.1.6.3.15.1.1.2.0" // <<< ADICIONE ESTA LINHA
+#define OID_usmStatsUnknownEngineIDs ".1.3.6.1.6.3.15.1.1.4.0"
 
 typedef struct RFC1213SystemStruct {
         char*           sysDescr;               /* .1.3.6.1.2.1.1.1.0   Read-only   */
@@ -144,5 +147,13 @@ typedef struct RFC1213SystemStruct {
     #define SNMP_LOGW(...)
     #define SNMP_LOGE(...)
 #endif
+
+#undef SNMP_LOGD
+#undef SNMP_LOGW
+#undef SNMP_LOGE
+
+#define SNMP_LOGD(...) Serial.printf("[DEBUG] " __VA_ARGS__); Serial.println()
+#define SNMP_LOGW(...) Serial.printf("[WARN ] " __VA_ARGS__); Serial.println()
+#define SNMP_LOGE(...) Serial.printf("[ERROR] " __VA_ARGS__); Serial.println()
 
 #endif
