@@ -70,73 +70,130 @@ SNMP_PACKET_PARSE_ERROR SNMPPacket::parsePacket(ComplexType *structure, enum SNM
             // <<< 3. NOVOS ESTADOS PARA PARSING DO CABEÇALHO v3
             case MSGGLOBALDATA:
             {
+                // <<< SUBSTITUA ESTE BLOCO INTEIRO >>>
                 ASSERT_ASN_TYPE_AT_STATE(value, STRUCTURE, MSGGLOBALDATA);
                 auto globalData = static_cast<ComplexType*>(value.get());
-                // msgID
+
+                // VERIFICAÇÃO ROBUSTA: Garantir que temos todos os 4 campos necessários
+                if (globalData->values.size() < 4) {
+                    SNMP_LOGW("msgGlobalData: esperava 4 campos, mas encontrou %d", globalData->values.size());
+                    return SNMP_PARSE_ERROR_AT_STATE(MSGGLOBALDATA);
+                }
+
+                // VERIFICAÇÃO ROBUSTA: Garantir que cada campo é do tipo correto antes de usar
+                if (globalData->values[0]->_type != INTEGER ||
+                    globalData->values[1]->_type != INTEGER ||
+                    globalData->values[2]->_type != STRING  ||
+                    globalData->values[3]->_type != INTEGER) {
+                    SNMP_LOGW("msgGlobalData: um ou mais campos com tipo inesperado.");
+                    return SNMP_PARSE_ERROR_AT_STATE(MSGGLOBALDATA);
+                }
+
+                // Agora que verificamos, podemos acessar os valores com segurança
                 this->msgID = static_cast<IntegerType*>(globalData->values[0].get())->_value;
-                // msgMaxSize
                 this->msgMaxSize = static_cast<IntegerType*>(globalData->values[1].get())->_value;
-                // msgFlags (Octet String de 1 byte)
-                this->msgFlags = static_cast<OctetType*>(globalData->values[2].get())->_value[0];
-                // msgSecurityModel
+                
+                auto msgFlagsOctet = static_cast<OctetType*>(globalData->values[2].get());
+                if (msgFlagsOctet->_value.length() != 1) {
+                    SNMP_LOGW("msgGlobalData: msgFlags deveria ter 1 byte.");
+                    return SNMP_PARSE_ERROR_AT_STATE(MSGGLOBALDATA);
+                }
+                this->msgFlags = (uint8_t)msgFlagsOctet->_value[0];
+                
                 this->msgSecurityModel = static_cast<IntegerType*>(globalData->values[3].get())->_value;
+                
                 state = MSGSECURITYPARAMETERS;
                 break;
             }
 
             case MSGSECURITYPARAMETERS:
             {
-                // <<< CORREÇÃO COMPLETA DESTA SEÇÃO >>>
+                SNMP_LOGD("Entrando no parsing de MSGSECURITYPARAMETERS...");
+                // <<< INÍCIO DA CORREÇÃO DEFINITIVA (BASEADA NA SUA ANÁLISE) >>>
                 ASSERT_ASN_TYPE_AT_STATE(value, STRING, MSGSECURITYPARAMETERS);
-                auto secParamsStr = std::static_pointer_cast<OctetType>(value);
+                auto secParamsOctetString = std::static_pointer_cast<OctetType>(value);
 
-                // Agora vamos decodificar a estrutura BER que está dentro desta Octet String
-                ComplexType secParamsStructure(STRUCTURE);
-                SNMP_BUFFER_PARSE_ERROR decodeResult = secParamsStructure.fromBuffer((uint8_t*)secParamsStr->_value.data(), secParamsStr->_value.length());
-
-                if (decodeResult <= 0) {
-                    SNMP_LOGW("Falha ao decodificar a estrutura interna dos msgSecurityParameters.");
-                    return SNMP_PARSE_ERROR_AT_STATE(MSGSECURITYPARAMETERS);
+                SNMP_LOGD("msgSecurityParameters contém %d bytes:", secParamsOctetString->_value.length());
+                for (size_t i = 0; i < secParamsOctetString->_value.length(); ++i) {
+                    SNMP_LOGD("Byte %02d: 0x%02X", i, (uint8_t)secParamsOctetString->_value[i]);
                 }
 
-                // Agora, populamos nossa estrutura securityParameters com os valores decodificados
-                auto engID = std::static_pointer_cast<OctetType>(secParamsStructure.values[0]);
+                // ETAPA 1: Decodificação Recursiva
+                // O conteúdo (value) da Octet String é outra estrutura BER.
+                // Vamos criar um novo objeto ComplexType para decodificar esse conteúdo.
+                SNMP_LOGD("Tentando decodificar BER interna dos securityParameters...");
+                ComplexType innerSecParamsStructure(STRUCTURE);
+                SNMP_BUFFER_PARSE_ERROR decodeResult = innerSecParamsStructure.fromBuffer(
+                    (const uint8_t*)secParamsOctetString->_value.data(),
+                    secParamsOctetString->_value.length()
+                );
+
+                SNMP_LOGD("Resultado do fromBuffer: %d", decodeResult);
+                
+                if (decodeResult <= 0) {
+                    SNMP_LOGW("Falha ao decodificar a estrutura BER interna dos securityParameters.");
+                    // Usamos o erro -21 que você observou, que provavelmente indica falha estrutural.
+                    // Você pode criar um erro mais específico se preferir.
+                    return -21; 
+                }
+
+                // ETAPA 2: Extração Segura dos Campos
+                // Agora, `innerSecParamsStructure.values` contém os campos de segurança decodificados.
+                const auto& fields = innerSecParamsStructure.values;
+
+                // Um pacote de descoberta válido tem pelo menos 4 campos. Um pacote autenticado tem mais.
+                if (fields.size() < 4) {
+                    SNMP_LOGW("Estrutura de securityParameters inválida: esperava pelo menos 4 campos, encontrou %d", fields.size());
+                    return -21;
+                }
+
+                // Extrai os campos fazendo a verificação de tipo para cada um
+                if(fields[0]->_type != STRING) return -21;
+                auto engID = std::static_pointer_cast<OctetType>(fields[0]);
                 memcpy(this->securityParameters.msgAuthoritativeEngineID, engID->_value.data(), engID->_value.length());
                 this->securityParameters.msgAuthoritativeEngineIDLength = engID->_value.length();
 
-                this->securityParameters.msgAuthoritativeEngineBoots = std::static_pointer_cast<IntegerType>(secParamsStructure.values[1])->_value;
-                this->securityParameters.msgAuthoritativeEngineTime = std::static_pointer_cast<IntegerType>(secParamsStructure.values[2])->_value;
+                if(fields[1]->_type != INTEGER) return -21;
+                this->securityParameters.msgAuthoritativeEngineBoots = std::static_pointer_cast<IntegerType>(fields[1])->_value;
+                
+                if(fields[2]->_type != INTEGER) return -21;
+                this->securityParameters.msgAuthoritativeEngineTime = std::static_pointer_cast<IntegerType>(fields[2])->_value;
 
-                auto uName = std::static_pointer_cast<OctetType>(secParamsStructure.values[3]);
+                if(fields[3]->_type != STRING) return -21;
+                auto uName = std::static_pointer_cast<OctetType>(fields[3]);
                 memcpy(this->securityParameters.msgUserName, uName->_value.data(), uName->_value.length());
                 this->securityParameters.msgUserNameLength = uName->_value.length();
 
-                // Os parâmetros de autenticação e privacidade são opcionais, então verificamos o tamanho
-                if (secParamsStructure.values.size() > 4) {
-                    auto authParams = std::static_pointer_cast<OctetType>(secParamsStructure.values[4]);
+                // Os parâmetros de autenticação e privacidade são opcionais
+                if (fields.size() > 4 && fields[4]->_type == STRING) {
+                    auto authParams = std::static_pointer_cast<OctetType>(fields[4]);
                     memcpy(this->securityParameters.msgAuthenticationParameters, authParams->_value.data(), authParams->_value.length());
                     this->securityParameters.msgAuthenticationParametersLength = authParams->_value.length();
                 }
-                if (secParamsStructure.values.size() > 5) {
-                    auto privParams = std::static_pointer_cast<OctetType>(secParamsStructure.values[5]);
+                if (fields.size() > 5 && fields[5]->_type == STRING) {
+                    auto privParams = std::static_pointer_cast<OctetType>(fields[5]);
                     memcpy(this->securityParameters.msgPrivacyParameters, privParams->_value.data(), privParams->_value.length());
                     this->securityParameters.msgPrivacyParametersLength = privParams->_value.length();
                 }
                 
                 state = SCOPEDPDU;
+                // <<< FIM DA CORREÇÃO DEFINITIVA >>>
                 break;
             }
             
             case SCOPEDPDU:
             {
+                SNMP_LOGD("Entrando no SCOPEDPDU...");
+                SNMP_LOGD("SCOPEDPDU: tipo ASN inesperado: 0x%02X", value->_type);
                 // A ScopedPDU pode ser um OCTET STRING (se criptografada) ou uma ESTRUTURA (se em texto plano)
                 if (value->_type == STRING) { // Criptografada
                     this->scopedPDUPtr = std::static_pointer_cast<OctetType>(value);
-                    this->packetPDUType; // Indicamos que a PDU não foi analisada
-                } else if (value->_type >= ASN_PDU_TYPE_MIN_VALUE && value->_type <= ASN_PDU_TYPE_MAX_VALUE) { // Texto plano
+                    this->packetPDUType = (ASN_TYPE)0; // Indicamos que a PDU não foi analisada
+                } else if ((uint8_t)value->_type >= ASN_PDU_TYPE_MIN_VALUE && (uint8_t)value->_type <= ASN_PDU_TYPE_MAX_VALUE) { // Texto plano
                     this->packetPDUType = value->_type;
                     return this->parsePacket(static_cast<ComplexType*>(value.get()), REQUESTID);
                 } else {
+                    SNMP_LOGD("Aqui é o erro?...");
                     return SNMP_PARSE_ERROR_GENERIC;
                 }
                 state = DONE; // Fim do parsing do pacote externo
@@ -197,6 +254,7 @@ SNMP_PACKET_PARSE_ERROR SNMPPacket::parsePacket(ComplexType *structure, enum SNM
             break;
 
             case DONE:
+                SNMP_LOGD("Entrando no DONE...");
                 return true;
         }
     }

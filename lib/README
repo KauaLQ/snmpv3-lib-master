@@ -55,11 +55,3 @@ O ESP-IDF (que está por baixo do framework Arduino no ESP32) já possui a bibli
 Processo de Autenticação: função que recebe uma mensagem e uma chave de autenticação, calcula o HMAC (HMAC-MD5 ou HMAC-SHA) da mensagem e compara com o msgAuthenticationParameters recebido.
 
 Processo de Criptografia/Decriptografia: funções que usam as chaves de privacidade para criptografar/descriptografar a scopedPDU usando DES ou AES.
-
-TODO: atualizar os seguintes arquivos para receber a USM
-
-~~SNMPPacket.cpp e .h~~
-~~SNMPResponse.cpp e .h~~
-SNMP_Agent.cpp e .h
-~~SNMPPDUHandler.cpp~~
-~~BER.h~~
