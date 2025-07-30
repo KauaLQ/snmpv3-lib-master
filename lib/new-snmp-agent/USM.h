@@ -51,7 +51,9 @@ public:
     bool passwordToKey(SNMPV3User& user);
 
     // Funções de autenticação
-    bool authenticateOutgoingMsg(const SNMPV3User& user, byte* packet, uint16_t packet_len, byte* auth_params_ptr);
+    // Assinatura antiga: bool authenticateOutgoingMsg(..., byte* auth_params_ptr);
+    // Assinatura NOVA:
+    bool authenticateOutgoingMsg(const SNMPV3User& user, const byte* packet, uint16_t packet_len, byte* hmac_output);
 
     // Assinatura antiga: (..., const byte* packet, ..., const byte* received_auth_params)
     // Assinatura NOVA:

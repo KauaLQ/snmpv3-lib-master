@@ -6,6 +6,8 @@
 #define ASN_TYPE_FOR_STATE_SNMPVERSION  INTEGER
 #define ASN_TYPE_FOR_STATE_COMMUNITY    STRING
 #define ASN_TYPE_FOR_STATE_REQUESTID    INTEGER
+#define ASN_TYPE_FOR_STATE_CONTEXTENGINEID STRING // <<< ADICIONE ESTA LINHA
+#define ASN_TYPE_FOR_STATE_CONTEXTNAME   STRING // <<< ADICIONE ESTA LINHA
 #define ASN_TYPE_FOR_STATE_ERRORSTATUS  INTEGER
 #define ASN_TYPE_FOR_STATE_ERRORID      INTEGER
 #define ASN_TYPE_FOR_STATE_VARBINDS     STRUCTURE
@@ -184,21 +186,35 @@ SNMP_PACKET_PARSE_ERROR SNMPPacket::parsePacket(ComplexType *structure, enum SNM
             case SCOPEDPDU:
             {
                 SNMP_LOGD("Entrando no SCOPEDPDU...");
-                SNMP_LOGD("SCOPEDPDU: tipo ASN inesperado: 0x%02X", value->_type);
+                SNMP_LOGD("SCOPEDPDU: tipo ASN recebido: 0x%02X", value->_type);
                 // A ScopedPDU pode ser um OCTET STRING (se criptografada) ou uma ESTRUTURA (se em texto plano)
                 if (value->_type == STRING) { // Criptografada
                     this->scopedPDUPtr = std::static_pointer_cast<OctetType>(value);
                     this->packetPDUType = (ASN_TYPE)0; // Indicamos que a PDU não foi analisada
-                } else if ((uint8_t)value->_type >= ASN_PDU_TYPE_MIN_VALUE && (uint8_t)value->_type <= ASN_PDU_TYPE_MAX_VALUE) { // Texto plano
+                } else if ((uint8_t)value->_type >= ASN_PDU_TYPE_MIN_VALUE && (uint8_t)value->_type <= ASN_PDU_TYPE_MAX_VALUE || value->_type == STRUCTURE) { // Texto plano
                     this->packetPDUType = value->_type;
-                    return this->parsePacket(static_cast<ComplexType*>(value.get()), REQUESTID);
+                    return this->parsePacket(static_cast<ComplexType*>(value.get()), CONTEXTENGINEID); // Mude de REQUESTID para CONTEXTENGINEID
                 } else {
-                    SNMP_LOGD("Aqui é o erro?...");
+                    SNMP_LOGW("SCOPEDPDU: tipo ASN inesperado e não reconhecido: 0x%02X", (uint8_t)value->_type);
                     return SNMP_PARSE_ERROR_GENERIC;
                 }
                 state = DONE; // Fim do parsing do pacote externo
                 break;
             }
+
+            case CONTEXTENGINEID:
+                ASSERT_ASN_STATE_TYPE(value, CONTEXTENGINEID);
+                this->contextEngineID = std::static_pointer_cast<OctetType>(value)->_value;
+                SNMP_LOGD("Parsed contextEngineID.");
+                state = CONTEXTNAME;
+                break;
+
+            case CONTEXTNAME:
+                ASSERT_ASN_STATE_TYPE(value, CONTEXTNAME);
+                this->contextName = std::static_pointer_cast<OctetType>(value)->_value;
+                SNMP_LOGD("Parsed contextName.");
+                state = PDU;
+                break;
 
             case PDU:
                 ASSERT_ASN_PARSING_TYPE_RANGE(value, ASN_PDU_TYPE_MIN_VALUE, ASN_PDU_TYPE_MAX_VALUE)
@@ -206,6 +222,7 @@ SNMP_PACKET_PARSE_ERROR SNMPPacket::parsePacket(ComplexType *structure, enum SNM
                 return this->parsePacket(static_cast<ComplexType*>(value.get()), REQUESTID);
 
             case REQUESTID:
+                SNMP_LOGD("Entrando em REQUESTID...");
                 ASSERT_ASN_STATE_TYPE(value, REQUESTID);
                 this->requestIDPtr = std::static_pointer_cast<IntegerType>(value);
                 this->requestID = this->requestIDPtr.get()->_value;
@@ -213,6 +230,7 @@ SNMP_PACKET_PARSE_ERROR SNMPPacket::parsePacket(ComplexType *structure, enum SNM
             break;
 
             case ERRORSTATUS:
+                SNMP_LOGD("Entrando em ERRORSTATUS...");
                 ASSERT_ASN_STATE_TYPE(value, ERRORSTATUS);
                 this->errorStatus.errorStatus = (SNMP_ERROR_STATUS) static_cast<IntegerType *>(value.get())->_value;
                 state = ERRORID;

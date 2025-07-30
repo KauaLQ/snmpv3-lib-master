@@ -176,19 +176,32 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
     this->packet->addValueToList(std::make_shared<OctetType>(std::string((char*)finalScopedPDUBytes, finalScopedPDULen)));
 
     // --- TÓPICOS 4 & 5: Serializar e Autenticar ---
-    // Serializa o pacote com o placeholder de autenticação zerado
+    // Serializa o pacote com o placeholder de autenticação (zeros)
     int finalPacketLen = this->packet->serialise(buf, max_len);
 
+    // <<< A ETAPA FINAL E CRUCIAL ESTÁ AQUI >>>
     if (_v3_user->securityLevel >= AUTH_NO_PRIV) {
-        // O USM calcula o HMAC sobre todo o buffer serializado
+        SNMP_LOGD("Autenticando pacote de saída...");
+
+        // A biblioteca BER precisa nos dizer onde o campo de autenticação foi escrito.
+        // Como isso é complexo, vamos usar uma abordagem robusta: recalcular o offset.
+        // Esta lógica assume uma estrutura BER relativamente fixa, o que é o nosso caso.
+        // [Seq][Len][Ver][...][GlobalData][...][SecurityParams(OctetString)][ScopedPDU]
+        // Precisamos encontrar o ponteiro para o campo authParams dentro da SecurityParams Octet String.
+
+        // Uma forma mais simples que implementamos foi modificar o objeto em memória e reserializar.
+        
+        // Vamos usar a abordagem que já está implementada:
         uint8_t hmac_result[20]; // SHA pode ter até 20 bytes
+        
+        // A função authenticateOutgoingMsg agora retorna o HMAC em hmac_result
         usm.authenticateOutgoingMsg(*_v3_user, buf, finalPacketLen, hmac_result);
 
-        // Agora, precisamos sobrescrever o placeholder no buffer final com o HMAC real.
-        // Esta é a parte mais delicada. Uma forma robusta é modificar o objeto em memória e reserializar.
+        // Atualiza o valor do placeholder em memória com o HMAC real
         authParamPtr->_value = std::string((char*)hmac_result, 12);
         
-        // Reserializa o pacote AGORA COM O HMAC CORRETO no lugar do placeholder
+        // Reserializa o pacote COMPLETO, agora com o HMAC correto no lugar
+        SNMP_LOGD("Reserializando pacote com HMAC final...");
         finalPacketLen = this->packet->serialise(buf, max_len);
     }
     

@@ -13,6 +13,8 @@ enum SNMPParsingState {
     MSGGLOBALDATA,
     MSGSECURITYPARAMETERS,
     SCOPEDPDU,
+    CONTEXTENGINEID, // <<< ADICIONE ESTA LINHA
+    CONTEXTNAME,     // <<< ADICIONE ESTA LINHA
     COMMUNITY,
     PDU,
     REQUESTID,
@@ -93,6 +95,9 @@ class SNMPPacket {
     void setVersion(SNMP_VERSION);
 
     bool reuse = false;
+
+    std::string contextEngineID; // <<< ADICIONE ESTA LINHA
+    std::string contextName;     // <<< ADICIONE ESTA LINHA
 
     std::shared_ptr<IntegerType> requestIDPtr = nullptr;
     std::shared_ptr<IntegerType> snmpVersionPtr = nullptr;

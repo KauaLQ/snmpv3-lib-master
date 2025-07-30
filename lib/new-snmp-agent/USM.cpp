@@ -52,6 +52,7 @@ uint32_t USM::getEngineTime() const {
 }
 
 // Algoritmo Password-to-Key (RFC 3414, Seção A.2)
+// <<< SUBSTITUA A FUNÇÃO passwordToKey INTEIRA POR ESTA VERSÃO CORRIGIDA >>>
 bool USM::passwordToKey(SNMPV3User& user) {
     const mbedtls_md_info_t* md_info;
     if (user.authProtocol == AUTH_PROTOCOL_SHA) {
@@ -62,69 +63,62 @@ bool USM::passwordToKey(SNMPV3User& user) {
 
     if (!md_info) return false;
 
-    // 1. Expande a senha para 1MB
-    byte digest[MBEDTLS_MD_MAX_SIZE];
-    mbedtls_md_context_t ctx;
-    mbedtls_md_init(&ctx);
-    mbedtls_md_setup(&ctx, md_info, 1); // HMAC
-
     const char* password = user.authPassword;
     size_t pass_len = strlen(password);
-    byte password_buf[64] = {0};
+    size_t digest_len = mbedtls_md_get_size(md_info);
+    byte digest[MBEDTLS_MD_MAX_SIZE];
+
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    mbedtls_md_setup(&ctx, md_info, 0); // 0 = Não usar HMAC
+
+    // --- Etapa 1: Algoritmo de expansão de senha para 1MB (RFC 3414, A.2.1) ---
+    // Em vez de alocar 1MB de RAM, fazemos o hash de forma iterativa, que é equivalente.
+    mbedtls_md_starts(&ctx);
     uint32_t count = 0;
-    const uint32_t one_mb = 1048576;
-    
-    mbedtls_md_hmac_starts(&ctx, (const byte*)password, pass_len);
-
-    while (count < one_mb) {
-        memcpy(password_buf, password, pass_len);
-        memset(password_buf + pass_len, 0, 64 - pass_len);
-        mbedtls_md_hmac_update(&ctx, password_buf, 64);
-        count += 64;
+    while (count < 1048576) {
+        mbedtls_md_update(&ctx, (const byte*)password, pass_len);
+        count += pass_len;
     }
-    mbedtls_md_hmac_finish(&ctx, digest);
+    mbedtls_md_finish(&ctx, digest);
 
-    // 2. Localiza a chave usando o EngineID
-    mbedtls_md_hmac_starts(&ctx, digest, mbedtls_md_get_size(md_info));
-    mbedtls_md_hmac_update(&ctx, _engineID, _engineIDLength);
-    mbedtls_md_hmac_update(&ctx, digest, mbedtls_md_get_size(md_info));
-    mbedtls_md_hmac_finish(&ctx, user.authKey);
+    // --- Etapa 2: Localização da chave com o EngineID (RFC 3414, A.2.2) ---
+    // key = HASH(digest || engineID || digest)
+    mbedtls_md_starts(&ctx);
+    mbedtls_md_update(&ctx, digest, digest_len);
+    mbedtls_md_update(&ctx, this->_engineID, this->_engineIDLength);
+    mbedtls_md_update(&ctx, digest, digest_len);
+    mbedtls_md_finish(&ctx, user.authKey);
 
     mbedtls_md_free(&ctx);
-
     Serial.println("Generated localized Auth Key.");
 
-    // Se o nível for AUTH_PRIV, gera a chave de privacidade da mesma forma
+    // Se o nível for AUTH_PRIV, repete o processo para a chave de privacidade
     if (user.securityLevel == AUTH_PRIV) {
-        // ... (Repete o processo para a privPassword) ...
-        // Este é um exercício idêntico ao anterior, apenas com a senha de privacidade
-        // Para brevidade, você pode criar uma função auxiliar
-        // Aqui está a implementação completa para clareza:
-        const char* privPassword = user.privPassword;
-        size_t priv_pass_len = strlen(privPassword);
-        
+        password = user.privPassword;
+        pass_len = strlen(password);
+
         mbedtls_md_init(&ctx);
-        mbedtls_md_setup(&ctx, md_info, 1); // HMAC
+        mbedtls_md_setup(&ctx, md_info, 0);
 
+        mbedtls_md_starts(&ctx);
         count = 0;
-        mbedtls_md_hmac_starts(&ctx, (const byte*)privPassword, priv_pass_len);
-        while (count < one_mb) {
-            memcpy(password_buf, privPassword, priv_pass_len);
-            memset(password_buf + priv_pass_len, 0, 64 - priv_pass_len);
-            mbedtls_md_hmac_update(&ctx, password_buf, 64);
-            count += 64;
+        while (count < 1048576) {
+            mbedtls_md_update(&ctx, (const byte*)password, pass_len);
+            count += pass_len;
         }
-        mbedtls_md_hmac_finish(&ctx, digest);
+        mbedtls_md_finish(&ctx, digest);
 
-        mbedtls_md_hmac_starts(&ctx, digest, mbedtls_md_get_size(md_info));
-        mbedtls_md_hmac_update(&ctx, _engineID, _engineIDLength);
-        mbedtls_md_hmac_update(&ctx, digest, mbedtls_md_get_size(md_info));
-        
-        // A chave de privacidade é truncada para 16 bytes (128 bits) para AES/DES
         byte temp_priv_key[MBEDTLS_MD_MAX_SIZE];
-        mbedtls_md_hmac_finish(&ctx, temp_priv_key);
+        mbedtls_md_starts(&ctx);
+        mbedtls_md_update(&ctx, digest, digest_len);
+        mbedtls_md_update(&ctx, this->_engineID, this->_engineIDLength);
+        mbedtls_md_update(&ctx, digest, digest_len);
+        mbedtls_md_finish(&ctx, temp_priv_key);
+        
+        // A chave de privacidade é sempre 16 bytes (128 bits)
         memcpy(user.privKey, temp_priv_key, 16);
-
+        
         mbedtls_md_free(&ctx);
         Serial.println("Generated localized Priv Key.");
     }
@@ -133,7 +127,7 @@ bool USM::passwordToKey(SNMPV3User& user) {
 }
 
 // Autentica uma mensagem que será ENVIADA
-bool USM::authenticateOutgoingMsg(const SNMPV3User& user, byte* packet, uint16_t packet_len, byte* auth_params_ptr) {
+bool USM::authenticateOutgoingMsg(const SNMPV3User& user, const byte* packet, uint16_t packet_len, byte* hmac_output) {
     if (user.securityLevel == NO_AUTH_NO_PRIV) return true;
 
     const mbedtls_md_info_t* md_info;
@@ -146,14 +140,8 @@ bool USM::authenticateOutgoingMsg(const SNMPV3User& user, byte* packet, uint16_t
         hash_size = 16;
     }
     
-    // Zera o campo de autenticação antes de calcular o HMAC
-    memset(auth_params_ptr, 0, 12);
-
-    byte hmac_result[MBEDTLS_MD_MAX_SIZE];
-    mbedtls_md_hmac(md_info, user.authKey, hash_size, packet, packet_len, hmac_result);
-
-    // Copia os 12 primeiros bytes do HMAC para o pacote
-    memcpy(auth_params_ptr, hmac_result, 12);
+    // O buffer de entrada 'packet' já deve ter o campo de autenticação zerado.
+    mbedtls_md_hmac(md_info, user.authKey, hash_size, packet, packet_len, hmac_output);
 
     return true;
 }
