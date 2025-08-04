@@ -1,10 +1,11 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include "SNMP_Agent.h" // Inclui a biblioteca da nossa nova pasta
+#include <Preferences.h> // <<< ADICIONE ESTA LINHA
 
 // --- Configurações de Wi-Fi ---
-const char* ssid = "Conan 3";
-const char* password = "12345678";
+const char* ssid = "CLEUDO";
+const char* password = "91898487";
 
 // --- Configuração do Agente SNMP ---
 SNMPAgent agent;
@@ -15,6 +16,16 @@ int uptime_minutes = 0;
 
 void setup() {
   Serial.begin(115200);
+
+  // --- LIMPEZA TEMPORÁRIA DA NVS ---
+  // Preferences preferences;
+  // preferences.begin("snmp-agent", false);
+  // preferences.clear();
+  // preferences.end();
+  // Serial.println("NVS do agente SNMP limpa. Reinicie o dispositivo.");
+  // while(1); // Trava o programa aqui
+  // --- FIM DA LIMPEZA ---
+
   Serial.println("\nIniciando Agente SNMPv3...");
 
   // Conectar ao Wi-Fi

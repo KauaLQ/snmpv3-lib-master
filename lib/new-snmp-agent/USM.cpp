@@ -1,6 +1,8 @@
 #include "USM.h"
 #include "SNMPPacket.h" // Para acessar SNMPV3SecurityParameters
 #include <WiFi.h> // Para obter o endereço MAC
+#include <Preferences.h> // <<< ADICIONE ESTA LINHA
+#include <cstring>
 
 // Includes da mbedTLS
 #include "mbedtls/md.h"
@@ -14,31 +16,35 @@ USM::USM() : _engineIDLength(0), _engineBoots(1), _startTime(0) {
 
 // Inicializa o módulo
 void USM::begin() {
-    // Gera o EngineID baseado no endereço MAC, conforme RFC 3411
-    // Formato: 0x80 (bit mais significativo) + 0x000004fb (IANA PEN para ESP-IDF, fictício) + 0x01 (formato MAC) + 6 bytes do MAC
-    
-    // PEN (Private Enterprise Number) - Você pode usar um seu se tiver.
-    // Usaremos um fictício para exemplo: 1.3.6.1.4.1.32473 (exemplo da Espressif)
-    const uint32_t enterpriseNumber = 32473;
+    Preferences preferences;
 
+    // Inicia o armazenamento "snmp-agent" em modo de leitura/escrita
+    preferences.begin("snmp-agent", false); 
+
+    // Lê o último valor de engineBoots salvo. Se não existir, o padrão é 0.
+    _engineBoots = preferences.getUInt("engineBoots", 0);
+    _engineBoots++; // Incrementa o contador de boots a cada reinicialização
+    
+    // Salva o novo valor de volta na NVS
+    preferences.putUInt("engineBoots", _engineBoots);
+    preferences.end();
+    
+    Serial.printf("SNMP EngineBoots: %d\n", _engineBoots);
+
+    // O resto da função continua como antes
+    const uint32_t enterpriseNumber = 32473;
     _engineID[0] = 0x80;
     _engineID[1] = 0x00;
     _engineID[2] = (enterpriseNumber >> 16) & 0xFF;
     _engineID[3] = (enterpriseNumber >> 8) & 0xFF;
     _engineID[4] = enterpriseNumber & 0xFF;
     
-    // Obter endereço MAC
     byte mac[6];
     WiFi.macAddress(mac);
-
     memcpy(&_engineID[5], mac, 6);
-    _engineIDLength = 11; // 5 bytes do prefixo + 6 do MAC
+    _engineIDLength = 11;
 
-    // Inicializa contadores de tempo
     _startTime = millis() / 1000;
-    // _engineBoots deveria ser lido da memória não volátil (NVS) se a persistência for necessária.
-    // Para simplificar, iniciamos sempre em 1.
-    _engineBoots = 1;
 
     Serial.print("USM Initialized. EngineID: ");
     for (int i = 0; i < _engineIDLength; i++) {
@@ -52,28 +58,28 @@ uint32_t USM::getEngineTime() const {
 }
 
 // Algoritmo Password-to-Key (RFC 3414, Seção A.2)
-// <<< SUBSTITUA A FUNÇÃO passwordToKey INTEIRA POR ESTA VERSÃO CORRIGIDA >>>
+// <<< FUNÇÃO passwordToKey DEFINITIVA E CORRIGIDA >>>
 bool USM::passwordToKey(SNMPV3User& user) {
     const mbedtls_md_info_t* md_info;
+    
+    // --- Configuração para Chave de Autenticação ---
     if (user.authProtocol == AUTH_PROTOCOL_SHA) {
         md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
     } else {
         md_info = mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
     }
-
     if (!md_info) return false;
 
     const char* password = user.authPassword;
     size_t pass_len = strlen(password);
     size_t digest_len = mbedtls_md_get_size(md_info);
     byte digest[MBEDTLS_MD_MAX_SIZE];
-
     mbedtls_md_context_t ctx;
-    mbedtls_md_init(&ctx);
-    mbedtls_md_setup(&ctx, md_info, 0); // 0 = Não usar HMAC
 
-    // --- Etapa 1: Algoritmo de expansão de senha para 1MB (RFC 3414, A.2.1) ---
-    // Em vez de alocar 1MB de RAM, fazemos o hash de forma iterativa, que é equivalente.
+    mbedtls_md_init(&ctx);
+    mbedtls_md_setup(&ctx, md_info, 0); // Hash puro
+
+    // Etapa 1: Expansão da senha para 1MB
     mbedtls_md_starts(&ctx);
     uint32_t count = 0;
     while (count < 1048576) {
@@ -82,25 +88,21 @@ bool USM::passwordToKey(SNMPV3User& user) {
     }
     mbedtls_md_finish(&ctx, digest);
 
-    // --- Etapa 2: Localização da chave com o EngineID (RFC 3414, A.2.2) ---
-    // key = HASH(digest || engineID || digest)
+    // Etapa 2: Localização da chave com o EngineID
     mbedtls_md_starts(&ctx);
     mbedtls_md_update(&ctx, digest, digest_len);
     mbedtls_md_update(&ctx, this->_engineID, this->_engineIDLength);
     mbedtls_md_update(&ctx, digest, digest_len);
     mbedtls_md_finish(&ctx, user.authKey);
-
-    mbedtls_md_free(&ctx);
     Serial.println("Generated localized Auth Key.");
 
-    // Se o nível for AUTH_PRIV, repete o processo para a chave de privacidade
+    // --- Configuração para Chave de Privacidade ---
     if (user.securityLevel == AUTH_PRIV) {
         password = user.privPassword;
         pass_len = strlen(password);
+        byte temp_priv_key[MBEDTLS_MD_MAX_SIZE];
 
-        mbedtls_md_init(&ctx);
-        mbedtls_md_setup(&ctx, md_info, 0);
-
+        // Reusa o mesmo md_info da autenticação
         mbedtls_md_starts(&ctx);
         count = 0;
         while (count < 1048576) {
@@ -109,40 +111,25 @@ bool USM::passwordToKey(SNMPV3User& user) {
         }
         mbedtls_md_finish(&ctx, digest);
 
-        byte temp_priv_key[MBEDTLS_MD_MAX_SIZE];
         mbedtls_md_starts(&ctx);
         mbedtls_md_update(&ctx, digest, digest_len);
         mbedtls_md_update(&ctx, this->_engineID, this->_engineIDLength);
         mbedtls_md_update(&ctx, digest, digest_len);
         mbedtls_md_finish(&ctx, temp_priv_key);
-        
-        // A chave de privacidade é sempre 16 bytes (128 bits)
-        memcpy(user.privKey, temp_priv_key, 16);
-        
-        mbedtls_md_free(&ctx);
+        memcpy(user.privKey, temp_priv_key, 16); // Chave de privacidade é sempre 128 bits
         Serial.println("Generated localized Priv Key.");
     }
-    
+
+    mbedtls_md_free(&ctx);
     return true;
 }
 
 // Autentica uma mensagem que será ENVIADA
 bool USM::authenticateOutgoingMsg(const SNMPV3User& user, const byte* packet, uint16_t packet_len, byte* hmac_output) {
     if (user.securityLevel == NO_AUTH_NO_PRIV) return true;
-
-    const mbedtls_md_info_t* md_info;
-    int hash_size;
-    if (user.authProtocol == AUTH_PROTOCOL_SHA) {
-        md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
-        hash_size = 20;
-    } else {
-        md_info = mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
-        hash_size = 16;
-    }
-    
-    // O buffer de entrada 'packet' já deve ter o campo de autenticação zerado.
+    const mbedtls_md_info_t* md_info = (user.authProtocol == AUTH_PROTOCOL_SHA) ? mbedtls_md_info_from_type(MBEDTLS_MD_SHA1) : mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
+    int hash_size = mbedtls_md_get_size(md_info);
     mbedtls_md_hmac(md_info, user.authKey, hash_size, packet, packet_len, hmac_output);
-
     return true;
 }
 
@@ -150,45 +137,62 @@ bool USM::authenticateOutgoingMsg(const SNMPV3User& user, const byte* packet, ui
 bool USM::authenticateIncomingMsg(const SNMPV3User& user, const SNMPV3SecurityParameters& params, const byte* packet, uint16_t packet_len) {
     if (user.securityLevel == NO_AUTH_NO_PRIV) return true;
 
-    // 1. VERIFICAÇÃO DA JANELA DE TEMPO (Time Window) - PONTO CRÍTICO FALTANTE
-    // Garante que a mensagem não é uma repetição ou muito antiga.
-    if (params.msgAuthoritativeEngineBoots != this->_engineBoots) {
-        Serial.println("Authentication failed: EngineBoots mismatch.");
-        return false; // Fora da janela de tempo
+    // 1. VERIFICAÇÃO DA JANELA DE TEMPO (Time Window)
+    // Os valores agora estão em host-order, a comparação direta é correta.
+    if (ntohl(params.msgAuthoritativeEngineBoots) != this->_engineBoots) {
+        Serial.printf("Authentication failed: EngineBoots mismatch. Expected: %d, Got: %d\n", this->_engineBoots, ntohl(params.msgAuthoritativeEngineBoots));
+        return false;
     }
-    if (abs((long)this->getEngineTime() - (long)params.msgAuthoritativeEngineTime) > 150) {
+    if (abs((long)this->getEngineTime() - (long)ntohl(params.msgAuthoritativeEngineTime)) > 150) {
         Serial.println("Authentication failed: Message out of time window.");
-        return false; // Fora da janela de tempo (150 segundos)
+        return false;
     }
 
-    // 2. VERIFICAÇÃO DO HMAC (lógica existente, mas agora confirmada após o time window)
-    const mbedtls_md_info_t* md_info;
-    int hash_size;
-    if (user.authProtocol == AUTH_PROTOCOL_SHA) {
-        md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
-        hash_size = 20;
-    } else {
-        md_info = mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
-        hash_size = 16;
+    // 2. VERIFICAÇÃO DO HMAC (Abordagem Definitiva com memmem)
+    const mbedtls_md_info_t* md_info = (user.authProtocol == AUTH_PROTOCOL_SHA) ? mbedtls_md_info_from_type(MBEDTLS_MD_SHA1) : mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
+    int hash_size = mbedtls_md_get_size(md_info);
+
+    // Procura a sequência de bytes da assinatura HMAC recebida dentro do pacote completo.
+    // A função memmem não é padrão em todas as toolchains, mas geralmente está disponível.
+    void* auth_params_location = memmem(
+        packet,                                  // Buffer onde procurar
+        packet_len,                              // Tamanho do buffer
+        params.msgAuthenticationParameters,      // O que procurar (a assinatura)
+        params.msgAuthenticationParametersLength // Tamanho da assinatura
+    );
+
+    // Se não encontrarmos a assinatura dentro do pacote, algo está muito errado.
+    if (auth_params_location == nullptr) {
+        Serial.println("Authentication failed: Could not locate auth signature within the packet buffer.");
+        return false;
     }
 
-    byte* temp_packet = (byte*)malloc(packet_len);
-    if (!temp_packet) return false;
+    // Agora temos o ponteiro exato. Preparamos o buffer para nosso próprio cálculo.
+    byte temp_packet[MAX_SNMP_PACKET_LENGTH];
     memcpy(temp_packet, packet, packet_len);
 
-    // O ponteiro para os parâmetros de autenticação no buffer é calculado pelo offset
-    int auth_params_offset = params.msgAuthenticationParameters - packet;
-    memset(temp_packet + auth_params_offset, 0, 12);
+    // Calculamos o offset usando o ponteiro que encontramos
+    int auth_params_offset = (byte*)auth_params_location - packet;
 
+    // Zeramos o campo de autenticação na nossa cópia
+    memset(temp_packet + auth_params_offset, 0, params.msgAuthenticationParametersLength);
+
+    // Calculamos o HMAC sobre a cópia modificada
     byte calculated_hmac[MBEDTLS_MD_MAX_SIZE];
     mbedtls_md_hmac(md_info, user.authKey, hash_size, temp_packet, packet_len, calculated_hmac);
-    free(temp_packet);
 
-    if (memcmp(calculated_hmac, params.msgAuthenticationParameters, 12) == 0) {
+    // Comparamos o resultado com a assinatura original
+    if (memcmp(calculated_hmac, params.msgAuthenticationParameters, params.msgAuthenticationParametersLength) == 0) {
         Serial.println("Authentication successful.");
         return true;
     } else {
         Serial.println("Authentication failed: Wrong Digest (HMAC).");
+        Serial.print("HMAC Recebido:  ");
+        for(int i=0; i<12; i++) Serial.printf("%02X", params.msgAuthenticationParameters[i]);
+        Serial.println();
+        Serial.print("HMAC Calculado: ");
+        for(int i=0; i<12; i++) Serial.printf("%02X", calculated_hmac[i]);
+        Serial.println();
         return false;
     }
 }
