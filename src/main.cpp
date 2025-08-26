@@ -4,8 +4,8 @@
 #include <Preferences.h> // <<< ADICIONE ESTA LINHA
 
 // --- Configurações de Wi-Fi ---
-const char* ssid = "CLEUDO";
-const char* password = "91898487";
+const char* ssid = "Conan 3";
+const char* password = "12345678";
 
 // --- Configuração do Agente SNMP ---
 SNMPAgent agent;

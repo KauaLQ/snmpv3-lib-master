@@ -1,5 +1,6 @@
 #include "include/SNMPPacket.h"
 #include "USM.h" // <<< 1. INCLUIR USM.h PARA ACESSO A ESTRUTURAS E FUNÇÕES
+#include <lwip/def.h>
 
 #define SNMP_PARSE_ERROR_AT_STATE(STATE) ((int)STATE * -1) - 10 + SNMP_PACKET_PARSE_ERROR_OFFSET
 
@@ -156,10 +157,12 @@ SNMP_PACKET_PARSE_ERROR SNMPPacket::parsePacket(ComplexType *structure, enum SNM
                 this->securityParameters.msgAuthoritativeEngineIDLength = engID->_value.length();
 
                 if(fields[1]->_type != INTEGER) return -21;
-                this->securityParameters.msgAuthoritativeEngineBoots = std::static_pointer_cast<IntegerType>(fields[1])->_value;
-                
+                // Convertemos de network byte order (big-endian) para host order
+                this->securityParameters.msgAuthoritativeEngineBoots = htonl(std::static_pointer_cast<IntegerType>(fields[1])->_value);
+
                 if(fields[2]->_type != INTEGER) return -21;
-                this->securityParameters.msgAuthoritativeEngineTime = std::static_pointer_cast<IntegerType>(fields[2])->_value;
+                // Convertemos de network byte order (big-endian) para host order
+                this->securityParameters.msgAuthoritativeEngineTime = htonl(std::static_pointer_cast<IntegerType>(fields[2])->_value);
 
                 if(fields[3]->_type != STRING) return -21;
                 auto uName = std::static_pointer_cast<OctetType>(fields[3]);
