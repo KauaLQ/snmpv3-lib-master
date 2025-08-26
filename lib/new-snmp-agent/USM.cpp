@@ -1,8 +1,12 @@
+// USM.cpp
+// --------------------------------------------------------------------------------
 #include "USM.h"
 #include "SNMPPacket.h" // Para acessar SNMPV3SecurityParameters
 #include <WiFi.h> // Para obter o endereço MAC
 #include <Preferences.h> // <<< ADICIONE ESTA LINHA
 #include <cstring>
+#include <algorithm> // para std::min/std::max
+#include <cstdint>
 
 // Includes da mbedTLS
 #include "mbedtls/md.h"
@@ -82,11 +86,25 @@ bool USM::passwordToKey(SNMPV3User& user) {
     // Etapa 1: Expansão da senha para 1MB
     mbedtls_md_starts(&ctx);
     uint32_t count = 0;
-    while (count < 1048576) {
-        mbedtls_md_update(&ctx, (const byte*)password, pass_len);
-        count += pass_len;
+    // Preencha exatamente 1.048.576 bytes repetindo a senha e truncando a última repetição
+    const uint32_t TARGET = 1048576;
+    uint32_t filled = 0;
+    if (pass_len == 0) {
+        // senha vazia - comportamento indefinido; retornamos falha
+        mbedtls_md_free(&ctx);
+        return false;
+    }
+    while (filled < TARGET) {
+        size_t need = TARGET - filled;
+        size_t to_copy = (pass_len <= need) ? pass_len : need;
+        mbedtls_md_update(&ctx, (const unsigned char*)password, to_copy);
+        filled += to_copy;
+        if (to_copy < pass_len) break; // terminamos com parte final da senha
     }
     mbedtls_md_finish(&ctx, digest);
+    Serial.print("Ku (1MB digest): ");
+    for (int i = 0; i < digest_len; ++i) Serial.printf("%02X", digest[i]);
+    Serial.println();
 
     // Etapa 2: Localização da chave com o EngineID
     mbedtls_md_starts(&ctx);
@@ -105,11 +123,25 @@ bool USM::passwordToKey(SNMPV3User& user) {
         // Reusa o mesmo md_info da autenticação
         mbedtls_md_starts(&ctx);
         count = 0;
-        while (count < 1048576) {
-            mbedtls_md_update(&ctx, (const byte*)password, pass_len);
-            count += pass_len;
+        // Preencha exatamente 1.048.576 bytes repetindo a senha e truncando a última repetição
+        const uint32_t TARGET = 1048576;
+        uint32_t filled = 0;
+        if (pass_len == 0) {
+            // senha vazia - comportamento indefinido; retornamos falha
+            mbedtls_md_free(&ctx);
+            return false;
+        }
+        while (filled < TARGET) {
+            size_t need = TARGET - filled;
+            size_t to_copy = (pass_len <= need) ? pass_len : need;
+            mbedtls_md_update(&ctx, (const unsigned char*)password, to_copy);
+            filled += to_copy;
+            if (to_copy < pass_len) break; // terminamos com parte final da senha
         }
         mbedtls_md_finish(&ctx, digest);
+        Serial.print("Ku (1MB digest): ");
+        for (int i = 0; i < digest_len; ++i) Serial.printf("%02X", digest[i]);
+        Serial.println();
 
         mbedtls_md_starts(&ctx);
         mbedtls_md_update(&ctx, digest, digest_len);
@@ -124,27 +156,7 @@ bool USM::passwordToKey(SNMPV3User& user) {
     return true;
 }
 
-// Autentica uma mensagem que será ENVIADA
-bool USM::authenticateOutgoingMsg(const SNMPV3User& user, const byte* packet, uint16_t packet_len, byte* hmac_output) {
-    if (user.securityLevel == NO_AUTH_NO_PRIV) return true;
-
-    const mbedtls_md_info_t* md_info = (user.authProtocol == AUTH_PROTOCOL_SHA)
-        ? mbedtls_md_info_from_type(MBEDTLS_MD_SHA1)
-        : mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
-
-    int digest_len = mbedtls_md_get_size(md_info);
-    byte full_hmac[MBEDTLS_MD_MAX_SIZE];
-
-    // Calcula o HMAC completo (16 bytes para MD5, 20 bytes para SHA-1)
-    mbedtls_md_hmac(md_info, user.authKey, digest_len, packet, packet_len, full_hmac);
-
-    // Copia apenas os 12 primeiros bytes (HMAC-96) para o campo do pacote
-    memcpy(hmac_output, full_hmac, 12);
-
-    return true;
-}
-
-// ----------------- HELPERS (p/ authenticateIncomingMsg) -----------------
+// ----------------- HELPERS (adicionados) -----------------
 
 // procura uma sub-sequência 'needle' dentro de 'haystack', retorna offset ou -1
 static int findSubsequence(const byte* haystack, int haystack_len, const byte* needle, int needle_len) {
@@ -211,8 +223,89 @@ static int findAuthParamsOffsetNearEngineID(const byte* packet, int packet_len,
     return fallback; // pode ser -1 se não encontrar
 }
 
-// ----------------- authenticateIncomingMsg (substitua a existente por esta) -----------------
+// ----------------- Helper: localiza authKey para um engineID específico -----------------
+static bool localizeAuthKeyForEngine(const SNMPV3User& user,
+                                    const byte* engineID, int engineIDLen,
+                                    byte* outKey, int& outKeyLen) {
+    if (!user.authPassword || !outKey) return false;
 
+    const mbedtls_md_info_t* md_info = (user.authProtocol == AUTH_PROTOCOL_SHA)
+        ? mbedtls_md_info_from_type(MBEDTLS_MD_SHA1)
+        : mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
+    if (!md_info) return false;
+
+    int digest_len = mbedtls_md_get_size(md_info);
+    byte digest[MBEDTLS_MD_MAX_SIZE];
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    if (mbedtls_md_setup(&ctx, md_info, 0) != 0) {
+        mbedtls_md_free(&ctx);
+        return false;
+    }
+
+    // 1) Stretch password para 1MB -> Ku
+    mbedtls_md_starts(&ctx);
+    const char* password = user.authPassword;
+    size_t pass_len = strlen(password);
+    uint32_t total = 0;
+    if (pass_len == 0) {
+        mbedtls_md_free(&ctx);
+        return false;
+    }
+    // Preencha exatamente 1.048.576 bytes repetindo a senha e truncando a última repetição
+    const uint32_t TARGET = 1048576;
+    uint32_t filled = 0;
+    if (pass_len == 0) {
+        // senha vazia - comportamento indefinido; retornamos falha
+        mbedtls_md_free(&ctx);
+        return false;
+    }
+    while (filled < TARGET) {
+        size_t need = TARGET - filled;
+        size_t to_copy = (pass_len <= need) ? pass_len : need;
+        mbedtls_md_update(&ctx, (const unsigned char*)password, to_copy);
+        filled += to_copy;
+        if (to_copy < pass_len) break; // terminamos com parte final da senha
+    }
+    mbedtls_md_finish(&ctx, digest);
+    Serial.print("Ku (1MB digest): ");
+    for (int i = 0; i < digest_len; ++i) Serial.printf("%02X", digest[i]);
+    Serial.println();
+
+
+    // 2) Localize: Kul = Hash(Ku || engineID || Ku)
+    byte localized[MBEDTLS_MD_MAX_SIZE];
+    mbedtls_md_starts(&ctx);
+    mbedtls_md_update(&ctx, digest, digest_len);
+    if (engineID && engineIDLen > 0) mbedtls_md_update(&ctx, engineID, engineIDLen);
+    mbedtls_md_update(&ctx, digest, digest_len);
+    mbedtls_md_finish(&ctx, localized);
+
+    // copia para saída
+    memcpy(outKey, localized, digest_len);
+    outKeyLen = digest_len;
+
+    mbedtls_md_free(&ctx);
+    return true;
+}
+
+// ----------------- Autentica uma mensagem que será ENVIADA -----------------
+bool USM::authenticateOutgoingMsg(const SNMPV3User& user, const byte* packet, uint16_t packet_len, byte* hmac_output) {
+    if (user.securityLevel == NO_AUTH_NO_PRIV) return true;
+    const mbedtls_md_info_t* md_info = (user.authProtocol == AUTH_PROTOCOL_SHA) ? mbedtls_md_info_from_type(MBEDTLS_MD_SHA1) : mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
+    int digest_len = mbedtls_md_get_size(md_info);
+    byte full_hmac[MBEDTLS_MD_MAX_SIZE];
+
+    // Calcula o HMAC completo (16 bytes para MD5, 20 bytes para SHA-1)
+    mbedtls_md_hmac(md_info, user.authKey, digest_len, packet, packet_len, full_hmac);
+
+    // Copia apenas os 12 primeiros bytes (HMAC-96) para o campo do pacote
+    memcpy(hmac_output, full_hmac, 12);
+
+    return true;
+}
+
+// ----------------- Autentica uma mensagem RECEBIDA (substituída) -----------------
 bool USM::authenticateIncomingMsg(const SNMPV3User& user, const SNMPV3SecurityParameters& params, const byte* packet, uint16_t packet_len) {
     if (user.securityLevel == NO_AUTH_NO_PRIV) return true;
 
@@ -251,8 +344,8 @@ bool USM::authenticateIncomingMsg(const SNMPV3User& user, const SNMPV3SecurityPa
         digest_len,
         params.msgAuthenticationParametersLength);
 
-    // 3) imprime a chave derivada (authKey) para debugging (remover depois)
-    Serial.print("Derived authKey: ");
+    // 3) Imprime a chave derivada local (debug)
+    Serial.print("Derived authKey (local): ");
     for (int i = 0; i < digest_len; ++i) {
         Serial.printf("%02X", user.authKey[i]);
     }
@@ -269,8 +362,8 @@ bool USM::authenticateIncomingMsg(const SNMPV3User& user, const SNMPV3SecurityPa
     }
 
     Serial.printf("auth_params_offset: %d (packet_len=%d)\n", auth_params_offset, packet_len);
-    int aroundStart = max(0, auth_params_offset - 16);
-    int aroundEnd   = min((int)packet_len, auth_params_offset + 16 + params.msgAuthenticationParametersLength);
+    int aroundStart = std::max(0, auth_params_offset - 16);
+    int aroundEnd   = std::min((int)packet_len, auth_params_offset + 16 + params.msgAuthenticationParametersLength);
     Serial.print("Packet bytes around auth field: ");
     for (int i = aroundStart; i < aroundEnd; ++i) Serial.printf("%02X", packet[i]);
     Serial.println();
@@ -297,10 +390,31 @@ bool USM::authenticateIncomingMsg(const SNMPV3User& user, const SNMPV3SecurityPa
     if (zero_len > 32) zero_len = 32;
     memset(temp_packet + auth_params_offset, 0, zero_len);
 
-    // 6) calcula HMAC completo sobre temp_packet
+    // ===== Antes de calcular HMAC, derive a chave localizada para o engineID autoritativo da mensagem =====
+    byte localized_key[MBEDTLS_MD_MAX_SIZE];
+    int localized_key_len = 0;
+    bool ok_loc = localizeAuthKeyForEngine(user,
+                                params.msgAuthoritativeEngineID,
+                                params.msgAuthoritativeEngineIDLength,
+                                localized_key, localized_key_len);
+    if (!ok_loc) {
+        Serial.println("Authentication failed: could not localize auth key for incoming engineID.");
+        return false;
+    }
+
+    // LOG útil para debugging: engineID e chave localizada
+    Serial.print("Incoming authoritativeEngineID: ");
+    for (int i=0;i<params.msgAuthoritativeEngineIDLength;i++) Serial.printf("%02X", params.msgAuthoritativeEngineID[i]);
+    Serial.println();
+
+    Serial.print("Localized authKey (for incoming engine): ");
+    for (int i=0;i<localized_key_len;i++) Serial.printf("%02X", localized_key[i]);
+    Serial.println();
+
+    // 6) calcula HMAC completo sobre temp_packet usando localized_key
     byte full_hmac[MBEDTLS_MD_MAX_SIZE];
     memset(full_hmac, 0, sizeof(full_hmac));
-    mbedtls_md_hmac(md_info, user.authKey, digest_len, temp_packet, packet_len, full_hmac);
+    mbedtls_md_hmac(md_info, localized_key, localized_key_len, temp_packet, packet_len, full_hmac);
 
     // prints de debugging do HMAC
     Serial.print("Full HMAC calc: ");
