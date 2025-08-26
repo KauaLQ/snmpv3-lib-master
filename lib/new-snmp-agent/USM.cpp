@@ -127,71 +127,205 @@ bool USM::passwordToKey(SNMPV3User& user) {
 // Autentica uma mensagem que será ENVIADA
 bool USM::authenticateOutgoingMsg(const SNMPV3User& user, const byte* packet, uint16_t packet_len, byte* hmac_output) {
     if (user.securityLevel == NO_AUTH_NO_PRIV) return true;
-    const mbedtls_md_info_t* md_info = (user.authProtocol == AUTH_PROTOCOL_SHA) ? mbedtls_md_info_from_type(MBEDTLS_MD_SHA1) : mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
-    int hash_size = mbedtls_md_get_size(md_info);
-    mbedtls_md_hmac(md_info, user.authKey, hash_size, packet, packet_len, hmac_output);
+
+    const mbedtls_md_info_t* md_info = (user.authProtocol == AUTH_PROTOCOL_SHA)
+        ? mbedtls_md_info_from_type(MBEDTLS_MD_SHA1)
+        : mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
+
+    int digest_len = mbedtls_md_get_size(md_info);
+    byte full_hmac[MBEDTLS_MD_MAX_SIZE];
+
+    // Calcula o HMAC completo (16 bytes para MD5, 20 bytes para SHA-1)
+    mbedtls_md_hmac(md_info, user.authKey, digest_len, packet, packet_len, full_hmac);
+
+    // Copia apenas os 12 primeiros bytes (HMAC-96) para o campo do pacote
+    memcpy(hmac_output, full_hmac, 12);
+
     return true;
 }
 
-// Autentica uma mensagem RECEBIDA
+// ----------------- HELPERS (p/ authenticateIncomingMsg) -----------------
+
+// procura uma sub-sequência 'needle' dentro de 'haystack', retorna offset ou -1
+static int findSubsequence(const byte* haystack, int haystack_len, const byte* needle, int needle_len) {
+    if (!haystack || !needle || needle_len <= 0 || haystack_len < needle_len) return -1;
+    for (int i = 0; i <= haystack_len - needle_len; ++i) {
+        if (memcmp(haystack + i, needle, needle_len) == 0) return i;
+    }
+    return -1;
+}
+
+// Retorna offset do começo do conteúdo do OCTET STRING que contém os auth params,
+// procurando preferencialmente próximo ao engineID.
+// Retorna -1 se não encontrar.
+static int findAuthParamsOffsetNearEngineID(const byte* packet, int packet_len,
+                                            const byte* engineID, int engineIDLen,
+                                            const byte* authParams, int authParamsLen) {
+    if (!packet || packet_len <= 0) return -1;
+
+    // 1) tenta localizar engineID no pacote
+    int startSearch = 0;
+    int foundEngineOffset = -1;
+    if (engineID && engineIDLen > 0) {
+        foundEngineOffset = findSubsequence(packet, packet_len, engineID, engineIDLen);
+        if (foundEngineOffset >= 0) {
+            // vamos começar a busca dos OCTET STRING a partir do engineID
+            startSearch = foundEngineOffset;
+        }
+    }
+
+    // 2) itera pelos possíveis OCTET STRING (tag 0x04) a partir de startSearch até o fim
+    for (int pos = startSearch; pos + 2 < packet_len; ++pos) {
+        if (packet[pos] != 0x04) continue; // tag OCTET STRING
+        // decodifica comprimento BER
+        int lenPos = pos + 1;
+        if (lenPos >= packet_len) continue;
+        uint8_t lb = packet[lenPos];
+        int lenBytes = 1;
+        int lenVal = 0;
+        if ((lb & 0x80) == 0) {
+            lenVal = lb;
+            lenBytes = 1;
+        } else {
+            int n = lb & 0x7F;
+            if (lenPos + n >= packet_len) continue;
+            lenVal = 0;
+            for (int i = 0; i < n; ++i) {
+                lenVal = (lenVal << 8) | packet[lenPos + 1 + i];
+            }
+            lenBytes = 1 + n;
+        }
+        int valueOffset = pos + 1 + lenBytes;
+        if (valueOffset + lenVal > packet_len) continue;
+
+        // se o comprimento bate com authParamsLen e o conteúdo coincide, retornamos offset
+        if (lenVal == authParamsLen) {
+            if (memcmp(packet + valueOffset, authParams, authParamsLen) == 0) {
+                return valueOffset;
+            }
+        }
+    }
+
+    // último recurso: procura em todo o buffer por authParams (fallback)
+    int fallback = findSubsequence(packet, packet_len, authParams, authParamsLen);
+    return fallback; // pode ser -1 se não encontrar
+}
+
+// ----------------- authenticateIncomingMsg (substitua a existente por esta) -----------------
+
 bool USM::authenticateIncomingMsg(const SNMPV3User& user, const SNMPV3SecurityParameters& params, const byte* packet, uint16_t packet_len) {
     if (user.securityLevel == NO_AUTH_NO_PRIV) return true;
 
-    // 1. VERIFICAÇÃO DA JANELA DE TEMPO (Time Window)
-    // Os valores agora estão em host-order, a comparação direta é correta.
-    if (ntohl(params.msgAuthoritativeEngineBoots) != this->_engineBoots) {
-        Serial.printf("Authentication failed: EngineBoots mismatch. Expected: %d, Got: %d\n", this->_engineBoots, ntohl(params.msgAuthoritativeEngineBoots));
+    // 0) sanity checks
+    if (!packet || packet_len == 0) {
+        Serial.println("Authentication failed: empty packet.");
         return false;
     }
-    if (abs((long)this->getEngineTime() - (long)ntohl(params.msgAuthoritativeEngineTime)) > 150) {
+
+    // 1) Verificação da janela de tempo
+    uint32_t incomingBoots = ntohl(params.msgAuthoritativeEngineBoots);
+    uint32_t incomingTime  = ntohl(params.msgAuthoritativeEngineTime);
+
+    if (incomingBoots != this->_engineBoots) {
+        Serial.printf("Authentication failed: EngineBoots mismatch. Expected: %d, Got: %d\n", this->_engineBoots, incomingBoots);
+        return false;
+    }
+    if (abs((long)this->getEngineTime() - (long)incomingTime) > 150) {
         Serial.println("Authentication failed: Message out of time window.");
         return false;
     }
 
-    // 2. VERIFICAÇÃO DO HMAC (Abordagem Definitiva com memmem)
-    const mbedtls_md_info_t* md_info = (user.authProtocol == AUTH_PROTOCOL_SHA) ? mbedtls_md_info_from_type(MBEDTLS_MD_SHA1) : mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
-    int hash_size = mbedtls_md_get_size(md_info);
+    // 2) Setup do algoritmo de hash/HMAC
+    const mbedtls_md_info_t* md_info = (user.authProtocol == AUTH_PROTOCOL_SHA)
+        ? mbedtls_md_info_from_type(MBEDTLS_MD_SHA1)
+        : mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
 
-    // Procura a sequência de bytes da assinatura HMAC recebida dentro do pacote completo.
-    // A função memmem não é padrão em todas as toolchains, mas geralmente está disponível.
-    void* auth_params_location = memmem(
-        packet,                                  // Buffer onde procurar
-        packet_len,                              // Tamanho do buffer
-        params.msgAuthenticationParameters,      // O que procurar (a assinatura)
-        params.msgAuthenticationParametersLength // Tamanho da assinatura
-    );
-
-    // Se não encontrarmos a assinatura dentro do pacote, algo está muito errado.
-    if (auth_params_location == nullptr) {
-        Serial.println("Authentication failed: Could not locate auth signature within the packet buffer.");
+    if (!md_info) {
+        Serial.println("Authentication failed: md_info NULL.");
         return false;
     }
 
-    // Agora temos o ponteiro exato. Preparamos o buffer para nosso próprio cálculo.
+    int digest_len = mbedtls_md_get_size(md_info);
+    Serial.printf("Auth protocol: %s, digest_len: %d, authParamLen (pkt): %d\n",
+        (user.authProtocol==AUTH_PROTOCOL_SHA) ? "SHA1":"MD5",
+        digest_len,
+        params.msgAuthenticationParametersLength);
+
+    // 3) imprime a chave derivada (authKey) para debugging (remover depois)
+    Serial.print("Derived authKey: ");
+    for (int i = 0; i < digest_len; ++i) {
+        Serial.printf("%02X", user.authKey[i]);
+    }
+    Serial.println();
+
+    // 4) Localiza offset exato do conteúdo do OCTET STRING que contém msgAuthenticationParameters
+    int auth_params_offset = findAuthParamsOffsetNearEngineID(packet, packet_len,
+        params.msgAuthoritativeEngineID, params.msgAuthoritativeEngineIDLength,
+        params.msgAuthenticationParameters, params.msgAuthenticationParametersLength);
+
+    if (auth_params_offset < 0) {
+        Serial.println("Authentication failed: Could not locate auth signature within the packet buffer (robust search).");
+        return false;
+    }
+
+    Serial.printf("auth_params_offset: %d (packet_len=%d)\n", auth_params_offset, packet_len);
+    int aroundStart = max(0, auth_params_offset - 16);
+    int aroundEnd   = min((int)packet_len, auth_params_offset + 16 + params.msgAuthenticationParametersLength);
+    Serial.print("Packet bytes around auth field: ");
+    for (int i = aroundStart; i < aroundEnd; ++i) Serial.printf("%02X", packet[i]);
+    Serial.println();
+
+    Serial.print("auth field (before zero): ");
+    for (int i = 0; i < params.msgAuthenticationParametersLength; ++i) Serial.printf("%02X", packet[auth_params_offset + i]);
+    Serial.println();
+
+    // 5) prepara cópia do pacote e zera o campo de autenticação EXATAMENTE no offset
     byte temp_packet[MAX_SNMP_PACKET_LENGTH];
+    if (packet_len > MAX_SNMP_PACKET_LENGTH) {
+        Serial.println("Authentication failed: packet_len > MAX_SNMP_PACKET_LENGTH");
+        return false;
+    }
     memcpy(temp_packet, packet, packet_len);
 
-    // Calculamos o offset usando o ponteiro que encontramos
-    int auth_params_offset = (byte*)auth_params_location - packet;
+    // RFC3414 usa HMAC-96 (12 bytes). Vamos zerar o tamanho recebido, mas avisar se for != 12.
+    int zero_len = params.msgAuthenticationParametersLength;
+    if (zero_len != 12) {
+        Serial.printf("WARN: msgAuthenticationParametersLength != 12 (%d). Using given length for zeroing.\n", zero_len);
+    }
+    // safety: clamp zero_len
+    if (zero_len < 0) zero_len = 12;
+    if (zero_len > 32) zero_len = 32;
+    memset(temp_packet + auth_params_offset, 0, zero_len);
 
-    // Zeramos o campo de autenticação na nossa cópia
-    memset(temp_packet + auth_params_offset, 0, params.msgAuthenticationParametersLength);
+    // 6) calcula HMAC completo sobre temp_packet
+    byte full_hmac[MBEDTLS_MD_MAX_SIZE];
+    memset(full_hmac, 0, sizeof(full_hmac));
+    mbedtls_md_hmac(md_info, user.authKey, digest_len, temp_packet, packet_len, full_hmac);
 
-    // Calculamos o HMAC sobre a cópia modificada
-    byte calculated_hmac[MBEDTLS_MD_MAX_SIZE];
-    mbedtls_md_hmac(md_info, user.authKey, hash_size, temp_packet, packet_len, calculated_hmac);
+    // prints de debugging do HMAC
+    Serial.print("Full HMAC calc: ");
+    for (int i = 0; i < digest_len; ++i) Serial.printf("%02X", full_hmac[i]);
+    Serial.println();
 
-    // Comparamos o resultado com a assinatura original
-    if (memcmp(calculated_hmac, params.msgAuthenticationParameters, params.msgAuthenticationParametersLength) == 0) {
+    Serial.print("HMAC-96 (used): ");
+    for (int i = 0; i < 12; ++i) Serial.printf("%02X", full_hmac[i]);
+    Serial.println();
+
+    Serial.print("Received auth field: ");
+    for (int i = 0; i < params.msgAuthenticationParametersLength; ++i) Serial.printf("%02X", params.msgAuthenticationParameters[i]);
+    Serial.println();
+
+    // 7) compara apenas os 12 primeiros bytes (HMAC-96)
+    if (memcmp(full_hmac, params.msgAuthenticationParameters, 12) == 0) {
         Serial.println("Authentication successful.");
         return true;
     } else {
         Serial.println("Authentication failed: Wrong Digest (HMAC).");
         Serial.print("HMAC Recebido:  ");
-        for(int i=0; i<12; i++) Serial.printf("%02X", params.msgAuthenticationParameters[i]);
+        for (int i = 0; i < 12; ++i) Serial.printf("%02X", params.msgAuthenticationParameters[i]);
         Serial.println();
         Serial.print("HMAC Calculado: ");
-        for(int i=0; i<12; i++) Serial.printf("%02X", calculated_hmac[i]);
+        for (int i = 0; i < 12; ++i) Serial.printf("%02X", full_hmac[i]);
         Serial.println();
         return false;
     }
