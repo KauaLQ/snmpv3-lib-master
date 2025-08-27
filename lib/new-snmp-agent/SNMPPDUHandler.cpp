@@ -6,6 +6,13 @@
 bool handleGetRequestPDU(std::deque<ValueCallback*> &callbacks, std::deque<VarBind> &varbindList, std::deque<VarBind> &outResponseList, SNMP_VERSION snmpVersion, bool isGetNextRequest){
     SNMP_LOGD("handleGetRequestPDU\n");
     for(const VarBind& requestVarBind : varbindList){
+        // antes de procurar callback
+        const auto& raw = requestVarBind.oid->rawData();
+        SNMP_LOGD("Incoming request OID raw bytes (len=%d):", (int)raw.size());
+        for (size_t i=0;i<raw.size();++i) SNMP_LOGD(" %02X", raw[i]);
+        SNMP_LOGD("\n");
+        SNMP_LOGD("Incoming request OID string: %s", requestVarBind.oid->string().c_str());
+
         SNMP_LOGD("finding callback for OID: %s\n", requestVarBind.oid->string().c_str());
         ValueCallback* callback = ValueCallback::findCallback(callbacks, requestVarBind.oid.get(), isGetNextRequest);
         if(!callback){

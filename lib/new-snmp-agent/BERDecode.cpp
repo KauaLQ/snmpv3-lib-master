@@ -1,17 +1,28 @@
 #include "include/BER.h"
+#include <sstream> // adicionar no topo do arquivo se ainda não estiver presente
 
 // Two ways to decode an int, one way where the first byte indicates how many butes follow, and ne where you have to power things by 128
+// === correção: decodifica subidentificador OID em base-128 (retorna bytes consumidos) ===
 static size_t decode_ber_longform_integer(const uint8_t* buf, long* decoded_integer, int max_len){
-    int i = 1;
-    long running_length = 0;
-    while(*buf >= 128 && i < max_len && running_length < INT_MAX){
-        running_length += *buf & 0x7F;
-        running_length *= 128;
-        buf++;
-        i++;
+    if (max_len <= 0) {
+        *decoded_integer = 0;
+        return 0;
     }
-    running_length += *buf; // the lone byte
-    *decoded_integer = running_length;
+    size_t i = 0;
+    uint32_t value = 0;
+    bool any = false;
+    // cada byte: 1bbbbbbb -> continue, 0bbbbbbb -> last
+    while (i < (size_t)max_len) {
+        uint8_t b = buf[i++];
+        any = true;
+        value = (value << 7) | (b & 0x7F);
+        if ((b & 0x80) == 0) break; // último byte do subidentifier
+    }
+    if (!any) {
+        *decoded_integer = 0;
+    } else {
+        *decoded_integer = (long)value;
+    }
     return i;
 }
 
@@ -131,6 +142,10 @@ int OIDType::fromBuffer(const uint8_t *buf, size_t max_len){
     if(*dataPtr != 0x2b) return SNMP_BUFFER_ERROR_INVALID_OID;
     this->data.reserve(_length);
     this->data.assign(dataPtr, dataPtr + _length);
+    // logo após this->data.assign(dataPtr, dataPtr + _length);
+    SNMP_LOGD("OIDType::fromBuffer raw bytes assigned (len=%d):", _length);
+    for (int k=0;k<_length;k++) SNMP_LOGD(" %02X", this->data[k]);
+    SNMP_LOGD("\n");
     this->valid = true;
 
     return _length + 2;
@@ -145,28 +160,49 @@ static inline void long_to_buf(char* buf, long l, short r = 0){
 }
 
 const std::string& OIDType::string() {
-    if(!this->_value.length()){
-        const uint8_t* dataPtr = this->data.data();
+    // se já montada, retorna
+    if (this->_value.length()) return this->_value;
+    // inicializa string vazia por segurança
+    this->_value.clear();
 
-        this->_value = ".1.3";
-        if(!this->valid) return this->_value;
-
-        dataPtr++;
-
-        int i = this->data.size() - 1;
-        char buffer[16];
-
-        while(i > 0){
-            memset(buffer, 0, sizeof(buffer));
-            long item = 0;
-            int itemLength = decode_ber_longform_integer(dataPtr, &item, i);
-            dataPtr += itemLength; i -= itemLength;
-
-            buffer[0] = '.';
-            long_to_buf(buffer+1, item);
-            this->_value.append(buffer);
-        }
+    if (!this->valid || this->data.size() == 0) {
+        return this->_value;
     }
+
+    // debug: imprima os bytes brutos do OID assim que lido (apenas para debug)
+    SNMP_LOGD("OIDType::string() raw data (len=%d):", (int)this->data.size());
+    for (size_t bi = 0; bi < this->data.size(); ++bi) SNMP_LOGD(" %02X", this->data[bi]);
+    SNMP_LOGD("\n");
+
+    const uint8_t* dataPtr = this->data.data();
+    size_t len = this->data.size();
+
+    // primeiro byte = 40 * X + Y  (X = first subid, Y = second)
+    uint8_t first = dataPtr[0];
+    uint32_t first_subid = first / 40;
+    uint32_t second_subid = first % 40;
+
+    std::ostringstream oss;
+    oss << "." << first_subid << "." << second_subid;
+
+    size_t idx = 1;
+    while (idx < len) {
+        uint32_t value = 0;
+        bool seenAny = false;
+        // acumula bytes de um subidentifier (base-128)
+        while (idx < len) {
+            uint8_t b = dataPtr[idx++];
+            seenAny = true;
+            value = (value << 7) | (b & 0x7F);
+            if ((b & 0x80) == 0) break; // fim deste subidentifier
+        }
+        if (!seenAny) break;
+        oss << "." << value;
+    }
+
+    this->_value = oss.str();
+
+    SNMP_LOGD("OIDType::string() parsed as: %s\n", this->_value.c_str());
     return this->_value;
 }
 

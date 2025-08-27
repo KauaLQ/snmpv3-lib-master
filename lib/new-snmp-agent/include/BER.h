@@ -194,6 +194,9 @@ class OIDType: public BER_CONTAINER {
         return std::shared_ptr<OIDType>(new OIDType(this->_value, this->data, this->valid));
     };
 
+    // adiciona getter para raw bytes do OID (útil para debugging)
+    const std::vector<uint8_t>& rawData() const { return this->data; }
+
     // This is for display and finding purposes, only builds the string from data on request
     const std::string& string();
     bool valid = false;
