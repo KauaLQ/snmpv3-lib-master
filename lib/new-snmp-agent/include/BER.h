@@ -95,10 +95,10 @@ class BER_CONTAINER {
     ASN_TYPE _type;
     int _length = 0;
 
-  protected:
     // Serialise object in BER notation into buf, with a maximum size of max_len; returns number of bytes used
     virtual int serialise(uint8_t* buf, size_t max_len);
     virtual int serialise(uint8_t* buf, size_t max_len, size_t known_length);
+  protected:
 
     // returns number of bytes used from buf, limited by max_len, return -1 if failed to parse
     virtual int fromBuffer(const uint8_t *buf, size_t max_len);

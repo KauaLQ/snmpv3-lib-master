@@ -62,6 +62,9 @@ int SNMPResponse::buildV3ReportPacket(uint8_t* buf, size_t max_len, USM& usm) {
     
     uint8_t secParamsBuf[128];
     int secParamsLen = secParamsStruct->serialise(secParamsBuf, 128);
+    SNMP_LOGD("secParams serialised len=%d", secParamsLen);
+    SNMP_LOGD("secParams HEX:");
+    for (int i=0;i<secParamsLen;i++) SNMP_LOGD("%02X", secParamsBuf[i]);
     this->packet->addValueToList(std::make_shared<OctetType>(std::string((char*)secParamsBuf, secParamsLen)));
 
     // 4. ScopedPDU contendo o Report-PDU
@@ -122,6 +125,10 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
     uint8_t scopedPDUBuf[512];
     int scopedPDULen = scopedPDU->serialise(scopedPDUBuf, 512);
 
+    SNMP_LOGD("ScopedPDU serialized len=%d", scopedPDULen);
+    SNMP_LOGD("ScopedPDU HEX:");
+    for (int i=0;i<scopedPDULen;i++) SNMP_LOGD("%02X", scopedPDUBuf[i]);
+
     // --- TÓPICO 2: Criptografar a ScopedPDU, se necessário ---
     uint8_t finalScopedPDUBytes[512];
     int finalScopedPDULen = scopedPDULen;
@@ -131,8 +138,14 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
         // <<< ALTERE ESTA CHAMADA >>>
         // Agora a função preenche o privacyParameters (salt) para nós
         finalScopedPDULen = usm.encryptPDU(*_v3_user, scopedPDUBuf, scopedPDULen, finalScopedPDUBytes, privacyParameters);
+        SNMP_LOGD("FinalScopedPDU len=%d (encrypted=%d)", finalScopedPDULen, _v3_user->securityLevel==AUTH_PRIV);
+        SNMP_LOGD("FinalScopedPDU HEX:");
+        for (int i=0;i<finalScopedPDULen;i++) SNMP_LOGD("%02X", finalScopedPDUBytes[i]);
     } else {
         memcpy(finalScopedPDUBytes, scopedPDUBuf, scopedPDULen);
+        SNMP_LOGD("FinalScopedPDU len=%d (encrypted=%d)", finalScopedPDULen, _v3_user->securityLevel==AUTH_PRIV);
+        SNMP_LOGD("FinalScopedPDU HEX:");
+        for (int i=0;i<finalScopedPDULen;i++) SNMP_LOGD("%02X", finalScopedPDUBytes[i]);
     }
 
     if (finalScopedPDULen <= 0 && _v3_user->securityLevel == AUTH_PRIV) {
@@ -170,6 +183,9 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
 
     uint8_t secParamsBuf[128];
     int secParamsLen = secParamsStruct->serialise(secParamsBuf, 128);
+    SNMP_LOGD("secParams serialised len=%d", secParamsLen);
+    SNMP_LOGD("secParams HEX:");
+    for (int i=0;i<secParamsLen;i++) SNMP_LOGD("%02X", secParamsBuf[i]);
     this->packet->addValueToList(std::make_shared<OctetType>(std::string((char*)secParamsBuf, secParamsLen)));
 
     // Adicionar ScopedPDU (criptografada ou não)
@@ -178,6 +194,9 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
     // --- TÓPICOS 4 & 5: Serializar e Autenticar ---
     // Serializa o pacote com o placeholder de autenticação (zeros)
     int finalPacketLen = this->packet->serialise(buf, max_len);
+    SNMP_LOGD("Packet pre-HMAC serialised len=%d", finalPacketLen);
+    SNMP_LOGD("Packet pre-HMAC HEX:");
+    for (int i=0;i<finalPacketLen;i++) SNMP_LOGD("%02X", buf[i]);
 
     // <<< A ETAPA FINAL E CRUCIAL ESTÁ AQUI >>>
     if (_v3_user->securityLevel >= AUTH_NO_PRIV) {
@@ -203,6 +222,18 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
         // Reserializa o pacote COMPLETO, agora com o HMAC correto no lugar
         SNMP_LOGD("Reserializando pacote com HMAC final...");
         finalPacketLen = this->packet->serialise(buf, max_len);
+
+        SNMP_LOGD("HMAC used (12 bytes):");
+        for (int i=0;i<12;i++) SNMP_LOGD("%02X", (uint8_t)hmac_result[i]);
+
+        SNMP_LOGD("Packet post-HMAC serialised len=%d", finalPacketLen);
+        SNMP_LOGD("Packet post-HMAC HEX:");
+        for (int i=0;i<finalPacketLen;i++) SNMP_LOGD("%02X", buf[i]);
+
+        // Quick self-parse test: try to decode with BER to make sure it's structurally valid
+        ComplexType sanity(STRUCTURE);
+        int check = sanity.fromBuffer(buf, finalPacketLen);
+        SNMP_LOGD("Self-parse sanity check returned: %d", check);
     }
     
     return finalPacketLen;

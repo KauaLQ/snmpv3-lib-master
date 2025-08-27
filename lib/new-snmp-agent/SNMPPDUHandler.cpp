@@ -37,6 +37,15 @@ bool handleGetRequestPDU(std::deque<ValueCallback*> &callbacks, std::deque<VarBi
         }
 
         outResponseList.emplace_back(callback->OID, value);
+
+        SNMP_LOGD("handleGetRequestPDU: adding VarBind for OID: %s", callback ? callback->OID->string().c_str() : requestVarBind.oid->string().c_str());
+        if (value) {
+            SNMP_LOGD(" Value type: 0x%02X", value->_type);
+            uint8_t tmp[64];
+            int l = value->serialise(tmp, sizeof(tmp));
+            SNMP_LOGD(" Value serialized (len=%d):", l);
+            for(int i=0;i<l;i++) SNMP_LOGD("  %02X", tmp[i]);
+        }
     }
     return true; // we didn't fail in our job, even if we filled in nothing
 }

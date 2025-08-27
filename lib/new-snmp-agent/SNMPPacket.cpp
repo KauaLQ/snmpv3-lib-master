@@ -443,6 +443,22 @@ std::shared_ptr<ComplexType> SNMPPacket::generateVarBindList(){
         varBindList->addValueToList(varBind);
     }
 
+    // --- DEBUG: print each VarBind and its value bytes for outgoing response ---
+    SNMP_LOGD("generateVarBindList debug: varbind count = %lu", varBindList->values.size());
+    for (size_t i=0;i<varBindList->values.size();++i) {
+        auto vb = std::static_pointer_cast<ComplexType>(varBindList->values[i]);
+        // OID is first child, value is second
+        auto oidPtr = std::static_pointer_cast<OIDType>(vb->values[0]);
+        auto valPtr = vb->values[1];
+        SNMP_LOGD(" VarBind[%lu] OID: %s, value ASN tag: 0x%02X", i, oidPtr->string().c_str(), valPtr->_type);
+
+        // serialize JUST the value TLV to inspect bytes
+        uint8_t tmp[64];
+        int len = valPtr->serialise(tmp, sizeof(tmp));
+        SNMP_LOGD("  value bytes (len=%d):", len);
+        for (int b=0;b<len;b++) SNMP_LOGD("   %02X", tmp[b]);
+    }
+
     return varBindList;
 }
 

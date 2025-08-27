@@ -157,6 +157,10 @@ SNMP_ERROR_RESPONSE handlePacket(
     // this will take the required stuff from request - like requestID, version etc
     SNMPResponse response = SNMPResponse(request);
 
+    // Ensure we respond with a GetResponse PDU
+    response.setPDUType(GetResponsePDU);
+    SNMP_LOGD("Response PDUType set to GetResponse (0xA2)");
+
     // <<< 5. PARA SNMPv3, ASSOCIAR A RESPOSTA AO USUÁRIO
     if (request.snmpVersion == SNMP_VERSION_3) {
         response.setV3User(requestUser); // Você precisará adicionar este método em SNMPResponse
@@ -236,6 +240,11 @@ SNMP_ERROR_RESPONSE handlePacket(
         SNMP_LOGD("Failed to build response packet");
         return SNMP_FAILED_SERIALISATION;
     }
+
+    SNMP_LOGD("Built response length = %d", *responseLength);
+    // hex dump of response
+    SNMP_LOGD("Response HEX dump:");
+    for (int i=0;i<*responseLength;i++) SNMP_LOGD("%02X", buffer[i]);
 
     return handleStatus;
 }
