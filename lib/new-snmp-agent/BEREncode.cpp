@@ -74,15 +74,30 @@ int NetworkAddress::serialise(uint8_t* buf, size_t max_len){
 }
 
 int IntegerType::serialise(uint8_t* buf, size_t max_len){
-    int i = BER_CONTAINER::serialise(buf, max_len, 4);
+    // calcula número mínimo de bytes necessários
+    int neededBytes = 1;
+    long tmp = _value;
+    SNMP_LOGD("IntegerType::serialise: value=%ld\n", _value);
+    // gera representação mínima, cuidando do bit de sinal
+    if (_value >= -128 && _value <= 127) {
+        neededBytes = 1;
+    } else if (_value >= -32768 && _value <= 32767) {
+        neededBytes = 2;
+    } else if (_value >= -8388608 && _value <= 8388607) {
+        neededBytes = 3;
+    } else {
+        neededBytes = 4;
+    }
+
+    int i = BER_CONTAINER::serialise(buf, max_len, neededBytes);
     CHECK_ENCODE_ERR(i);
     uint8_t *ptr = buf + i;
 
-    *ptr++ = _value >> 24 & 0xFF;
-    *ptr++ = _value >> 16 & 0xFF;
-    *ptr++ = _value >> 8 & 0xFF;
-    *ptr++ = _value & 0xFF;
-    
+    for (int b = neededBytes - 1; b >= 0; b--) {
+        *ptr++ = (_value >> (8 * b)) & 0xFF;
+    }
+    SNMP_LOGD("IntegerType::serialise encoded len=%d\n", neededBytes);
+
     return ptr - buf;
 }
 
