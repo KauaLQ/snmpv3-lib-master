@@ -1,5 +1,20 @@
 #include "include/SNMPResponse.h"
 #include "USM.h" // <<< 1. INCLUIR USM.h PARA ACESSO ÀS FUNÇÕES CRIPTOGRÁFICAS
+#ifdef _WIN32
+  #include <Winsock2.h>
+#else
+  #include <arpa/inet.h>
+#endif
+
+// Fallback for htonl if not defined
+#ifndef htonl
+inline uint32_t htonl(uint32_t x) {
+    return ((x & 0xFF) << 24) |
+           ((x & 0xFF00) << 8) |
+           ((x & 0xFF0000) >> 8) |
+           ((x & 0xFF000000) >> 24);
+}
+#endif
 
 // <<< 2. IMPLEMENTAR A NOVA FUNÇÃO setV3User
 void SNMPResponse::setV3User(SNMPV3User* user) {
@@ -139,6 +154,51 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
         // Agora a função preenche o privacyParameters (salt) para nós
         finalScopedPDULen = usm.encryptPDU(*_v3_user, scopedPDUBuf, scopedPDULen, finalScopedPDUBytes, privacyParameters);
         SNMP_LOGD("FinalScopedPDU len=%d (encrypted=%d)", finalScopedPDULen, _v3_user->securityLevel==AUTH_PRIV);
+
+        // --- SELF-DECRYPT SANITY CHECK (very important) ---
+        if (_v3_user->securityLevel == AUTH_PRIV && finalScopedPDULen > 0) {
+            SNMP_LOGD("Running SELF-DECRYPT check after encryptPDU...");
+
+            // Monta estrutura de security params mínima para decryptPDU (reusar decryptPDU)
+            SNMPV3SecurityParameters params;
+            memset(&params, 0, sizeof(params));
+            // Preencher com *wire-format* (big-endian) do engineBoots/time porque seu decryptPDU
+            // espera os bytes tal como estarão nos securityParameters do pacote:
+            uint32_t boots_n = htonl(usm.getEngineBoots());
+            uint32_t time_n  = htonl(usm.getEngineTime());
+            memcpy(&params.msgAuthoritativeEngineBoots, &boots_n, 4);
+            memcpy(&params.msgAuthoritativeEngineTime, &time_n, 4);
+            // engineID do agente
+            memcpy(params.msgAuthoritativeEngineID, usm.getEngineID(), usm.getEngineIDLength());
+            params.msgAuthoritativeEngineIDLength = (uint8_t)usm.getEngineIDLength();
+            // copiar privacyParameters que a encryptPDU retornou
+            memcpy(params.msgPrivacyParameters, privacyParameters, 8);
+            params.msgPrivacyParametersLength = 8;
+
+            // Buffer para teste de decrypt
+            uint8_t test_plain[1024];
+            memset(test_plain, 0, sizeof(test_plain));
+            int dec_len = usm.decryptPDU(*_v3_user, finalScopedPDUBytes, (uint16_t)finalScopedPDULen, test_plain, params);
+            if (dec_len <= 0) {
+                SNMP_LOGW("SELF-DECRYPT failed (decryptPDU returned %d).", dec_len);
+            } else {
+                // Compare os primeiros bytes com o scopedPDUBuf original
+                int compare_len = (dec_len < scopedPDULen) ? dec_len : scopedPDULen;
+                if (memcmp(test_plain, scopedPDUBuf, compare_len) != 0) {
+                    SNMP_LOGW("SELF-DECRYPT MISMATCH: decrypted bytes differ from original scopedPDU.");
+                    SNMP_LOGD("Original scopedPDU (first 64 bytes or length):");
+                    for (int i = 0; i < (scopedPDULen > 64 ? 64 : scopedPDULen); ++i) SNMP_LOGD("%02X", scopedPDUBuf[i]);
+                    SNMP_LOGD("Decrypted scopedPDU (first 64 bytes or length):");
+                    for (int i = 0; i < (dec_len > 64 ? 64 : dec_len); ++i) SNMP_LOGD("%02X", test_plain[i]);
+                } else {
+                    SNMP_LOGD("SELF-DECRYPT OK: decrypted plaintext equals original scopedPDU (len=%d).", dec_len);
+                    // opcional: log do buffer completo head/trailer
+                    SNMP_LOGD("Decrypted ScopedPDU head (first 32 bytes):");
+                    for (int i = 0; i < (dec_len > 32 ? 32 : dec_len); ++i) SNMP_LOGD("%02X", test_plain[i]);
+                }
+            }
+        }
+        
         SNMP_LOGD("FinalScopedPDU HEX:");
         for (int i=0;i<finalScopedPDULen;i++) SNMP_LOGD("%02X", finalScopedPDUBytes[i]);
     } else {

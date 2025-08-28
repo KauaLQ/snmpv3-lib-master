@@ -433,9 +433,37 @@ int USM::encryptPDU(const SNMPV3User& user, const byte* pdu, uint16_t pdu_len, b
         memcpy(iv + 4, &time_n, 4);
         memcpy(iv + 8, out_privacy_params, 8);
 
+        // --- Debug logs for encryption (salt, IV, privKey peek) ---
+        SNMP_LOGD("encryptPDU: salt (u64) = %llu, privSaltCounter = %llu\n", (unsigned long long)salt, (unsigned long long)_privSaltCounter);
+        SNMP_LOGD("encryptPDU: privacyParameters (8 bytes):");
+        for (int i = 0; i < 8; ++i) SNMP_LOGD("%02X", out_privacy_params[i]);
+        SNMP_LOGD("\n");
+        SNMP_LOGD("encryptPDU: IV (16 bytes):");
+        for (int i = 0; i < 16; ++i) SNMP_LOGD("%02X", iv[i]);
+        SNMP_LOGD("\n");
+
+        // --- LOCALIZE privKey FOR THE ENGINE ID used in this message ---
+        byte localized_priv_key[MBEDTLS_MD_MAX_SIZE];
+        int localized_priv_key_len = 0;
+        bool ok_loc = localizePrivKeyForEngine(user, this->_engineID, this->_engineIDLength, localized_priv_key, localized_priv_key_len);
+        if (!ok_loc) {
+            SNMP_LOGD("encryptPDU: ERROR localizing priv key for engineID\n");
+            return 0;
+        }
+
+        SNMP_LOGD("encryptPDU: localized_priv_key (first 16 bytes):");
+        for (int i=0;i<16;i++) SNMP_LOGD("%02X", localized_priv_key[i]);
+        SNMP_LOGD("\n");
+
+        // print stored user.privKey for comparison
+        SNMP_LOGD("encryptPDU: user.privKey (first 16 bytes):");
+        for (int i=0;i<16;i++) SNMP_LOGD("%02X", user.privKey[i]);
+        SNMP_LOGD("\n");
+
+        // Use the localized key (first 16 bytes) as AES key
         mbedtls_aes_context aes_ctx;
         mbedtls_aes_init(&aes_ctx);
-        mbedtls_aes_setkey_enc(&aes_ctx, user.privKey, 128);
+        mbedtls_aes_setkey_enc(&aes_ctx, localized_priv_key, 128);
 
         size_t iv_off = 0;
         mbedtls_aes_crypt_cfb128(&aes_ctx, MBEDTLS_AES_ENCRYPT, pdu_len, &iv_off, iv, pdu, encrypted_pdu);
@@ -468,14 +496,13 @@ int USM::decryptPDU(const SNMPV3User& user, const byte* encrypted_pdu, uint16_t 
             return 0;
         }
 
-        // Debug prints
-        Serial.print("IV for decryption: ");
-        for (int i=0;i<16;i++) Serial.printf("%02X", iv[i]);
-        Serial.println();
+        SNMP_LOGD("decryptPDU: IV for decryption: ");
+        for (int i=0;i<16;i++) SNMP_LOGD("%02X", iv[i]);
+        SNMP_LOGD("\n");
 
-        Serial.print("Localized privKey (first 16 bytes used): ");
-        for (int i=0;i<16;i++) Serial.printf("%02X", localized_priv_key[i]);
-        Serial.println();
+        SNMP_LOGD("decryptPDU: localized_priv_key (first 16 bytes): ");
+        for (int i=0;i<16;i++) SNMP_LOGD("%02X", localized_priv_key[i]);
+        SNMP_LOGD("\n");
 
         // AES key is first 16 bytes of localized result (RFC)
         mbedtls_aes_context aes_ctx;
