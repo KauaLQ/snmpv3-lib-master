@@ -294,6 +294,8 @@ std::shared_ptr<BER_CONTAINER> ComplexType::createObjectForType(ASN_TYPE valueTy
         case InformRequestPDU:
         case Trapv2PDU:
             return std::shared_ptr<BER_CONTAINER>(new ComplexType(valueType));
+        case ReportPDU:   // 0xA8
+            return std::shared_ptr<BER_CONTAINER>(new ComplexType(valueType));
         default:
             return nullptr;
     }
