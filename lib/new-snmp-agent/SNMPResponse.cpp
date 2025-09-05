@@ -60,12 +60,16 @@ int SNMPResponse::buildV3ReportPacket(uint8_t* buf, size_t max_len, USM& usm) {
     secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string("", 0)));
     secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string("", 0)));
     
+    // --- Serializa initial dos securityParameters, mas guardamos a OctetType para permitir atualização posterior ---
     uint8_t secParamsBuf[128];
-    int secParamsLen = secParamsStruct->serialise(secParamsBuf, 128);
+    int secParamsLen = secParamsStruct->serialise(secParamsBuf, sizeof(secParamsBuf));
     SNMP_LOGD("secParams serialised len=%d", secParamsLen);
     SNMP_LOGD("secParams HEX:");
     for (int i=0;i<secParamsLen;i++) SNMP_LOGD("%02X", secParamsBuf[i]);
-    this->packet->addValueToList(std::make_shared<OctetType>(std::string((char*)secParamsBuf, secParamsLen)));
+
+    // Guardar o OctetType que contém os bytes serializados — iremos atualizá-lo depois
+    auto secParamsOct = std::make_shared<OctetType>(std::string((char*)secParamsBuf, secParamsLen));
+    this->packet->addValueToList(secParamsOct);
 
     // 4. ScopedPDU contendo o Report-PDU
     auto scopedPDU = std::make_shared<ComplexType>(STRUCTURE);
@@ -181,12 +185,16 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
     secParamsStruct->addValueToList(authParamPtr); // Adiciona o placeholder
     secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string((char*)privacyParameters, _v3_user->securityLevel == AUTH_PRIV ? 8 : 0)));
 
+    // --- Serializa initial dos securityParameters, mas guardamos a OctetType para permitir atualização posterior ---
     uint8_t secParamsBuf[128];
-    int secParamsLen = secParamsStruct->serialise(secParamsBuf, 128);
+    int secParamsLen = secParamsStruct->serialise(secParamsBuf, sizeof(secParamsBuf));
     SNMP_LOGD("secParams serialised len=%d", secParamsLen);
     SNMP_LOGD("secParams HEX:");
     for (int i=0;i<secParamsLen;i++) SNMP_LOGD("%02X", secParamsBuf[i]);
-    this->packet->addValueToList(std::make_shared<OctetType>(std::string((char*)secParamsBuf, secParamsLen)));
+
+    // Guardar o OctetType que contém os bytes serializados — iremos atualizá-lo depois
+    auto secParamsOct = std::make_shared<OctetType>(std::string((char*)secParamsBuf, secParamsLen));
+    this->packet->addValueToList(secParamsOct);
 
     // Adicionar ScopedPDU (criptografada ou não)
     this->packet->addValueToList(std::make_shared<OctetType>(std::string((char*)finalScopedPDUBytes, finalScopedPDULen)));
@@ -218,6 +226,16 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
 
         // Atualiza o valor do placeholder em memória com o HMAC real
         authParamPtr->_value = std::string((char*)hmac_result, 12);
+
+        // Re-serializa a estrutura de securityParameters (agora com authParamPtr atualizado) e atualiza o OctetType que foi adicionado ao packet
+        int secParamsLen2 = secParamsStruct->serialise(secParamsBuf, sizeof(secParamsBuf));
+        if (secParamsLen2 > 0) {
+            secParamsOct->_value = std::string((char*)secParamsBuf, secParamsLen2);
+            SNMP_LOGD("Updated secParams HEX after HMAC insertion:");
+            for (int i=0;i<secParamsLen2;i++) SNMP_LOGD("%02X", secParamsBuf[i]);
+        } else {
+            SNMP_LOGW("Failed to reserialise secParams after HMAC update");
+        }
         
         // Reserializa o pacote COMPLETO, agora com o HMAC correto no lugar
         SNMP_LOGD("Reserializando pacote com HMAC final...");

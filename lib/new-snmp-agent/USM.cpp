@@ -290,18 +290,65 @@ static bool localizePrivKeyForEngine(const SNMPV3User& user,
     return true;
 }
 
-// ----------------- Autentica uma mensagem que será ENVIADA -----------------
+// ----------------- Autentica uma mensagem que será ENVIADA (melhorado) -----------------
 bool USM::authenticateOutgoingMsg(const SNMPV3User& user, const byte* packet, uint16_t packet_len, byte* hmac_output) {
     if (user.securityLevel == NO_AUTH_NO_PRIV) return true;
-    const mbedtls_md_info_t* md_info = (user.authProtocol == AUTH_PROTOCOL_SHA) ? mbedtls_md_info_from_type(MBEDTLS_MD_SHA1) : mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
+    if (!packet || packet_len == 0) { Serial.println("Outgoing auth failed: empty packet."); return false; }
+
+    // md_info
+    const mbedtls_md_info_t* md_info = (user.authProtocol == AUTH_PROTOCOL_SHA)
+        ? mbedtls_md_info_from_type(MBEDTLS_MD_SHA1)
+        : mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
+    if (!md_info) { Serial.println("Outgoing auth failed: md_info NULL."); return false; }
     int digest_len = mbedtls_md_get_size(md_info);
+
+    // work on a temp copy so podemos zeroar a região de auth
+    if (packet_len > MAX_SNMP_PACKET_LENGTH) { Serial.println("Outgoing auth failed: packet_len > MAX_SNMP_PACKET_LENGTH"); return false; }
+    byte temp_packet[MAX_SNMP_PACKET_LENGTH];
+    memcpy(temp_packet, packet, packet_len);
+
+    // Tentar localizar o campo de auth no pacote: procura robusta começando pelo engineID local
+    byte zero12[12];
+    memset(zero12, 0, sizeof(zero12));
+    int auth_params_offset = findAuthParamsOffsetNearEngineID(temp_packet, packet_len,
+        this->_engineID, this->_engineIDLength,
+        zero12, sizeof(zero12));
+
+    if (auth_params_offset >= 0) {
+        // zeroa o campo de autenticação (HMAC-96 = 12 bytes) antes do cálculo
+        int zero_len = 12;
+        memset(temp_packet + auth_params_offset, 0, zero_len);
+    } else {
+        // Se não encontramos o local, ainda assim tentamos um HMAC sobre todo o pacote
+        Serial.println("WARN: Could not locate auth params offset in outgoing packet. Calculating over full packet.");
+    }
+
+    // Localize auth key para o engine local (garante comportamento simétrico ao incoming)
+    byte localized_key[MBEDTLS_MD_MAX_SIZE];
+    int localized_key_len = 0;
+    bool ok_loc = localizeAuthKeyForEngine(user, this->_engineID, this->_engineIDLength, localized_key, localized_key_len);
+    if (!ok_loc) {
+        Serial.println("Outgoing auth failed: could not localize auth key for local engineID.");
+        return false;
+    }
+
+    // Calcular HMAC usando a chave localizada
     byte full_hmac[MBEDTLS_MD_MAX_SIZE];
+    memset(full_hmac, 0, sizeof(full_hmac));
+    mbedtls_md_hmac(md_info, localized_key, localized_key_len, temp_packet, packet_len, full_hmac);
 
-    // Calcula o HMAC completo
-    mbedtls_md_hmac(md_info, user.authKey, digest_len, packet, packet_len, full_hmac);
-
-    // Copia apenas os 12 primeiros bytes (HMAC-96)
+    // Copiar os 12 primeiros bytes (HMAC-96)
     memcpy(hmac_output, full_hmac, 12);
+
+    // Debug prints
+    Serial.print("Outgoing Localized authKey: ");
+    for (int i = 0; i < localized_key_len; ++i) Serial.printf("%02X", localized_key[i]);
+    Serial.println();
+
+    Serial.print("Outgoing HMAC-96: ");
+    for (int i = 0; i < 12; ++i) Serial.printf("%02X", hmac_output[i]);
+    Serial.println();
+
     return true;
 }
 
@@ -418,14 +465,16 @@ bool USM::authenticateIncomingMsg(const SNMPV3User& user, const SNMPV3SecurityPa
     }
 }
 
-// ----------------- Criptografia (encryptPDU) - AES-CFB-128 -----------------
+// ----------------- Criptografia (encryptPDU) - AES-CFB-128 (ajustada para usar chave localizada) -----------------
 int USM::encryptPDU(const SNMPV3User& user, const byte* pdu, uint16_t pdu_len, byte* encrypted_pdu, byte* out_privacy_params) {
     if (user.securityLevel != AUTH_PRIV) return 0;
 
     if (user.privProtocol == PRIV_PROTOCOL_AES) {
+        // Gerar salt de privacidade (8 bytes) - incrementa contador local
         uint64_t salt = ++_privSaltCounter;
         for (int i = 0; i < 8; i++) out_privacy_params[7 - i] = (salt >> (i * 8)) & 0xFF;
 
+        // Monta IV = engineBoots (4 bytes), engineTime (4 bytes), privacyParams (8 bytes)
         uint8_t iv[16];
         uint32_t boots_n = htonl(this->_engineBoots);
         uint32_t time_n = htonl(this->getEngineTime());
@@ -433,9 +482,28 @@ int USM::encryptPDU(const SNMPV3User& user, const byte* pdu, uint16_t pdu_len, b
         memcpy(iv + 4, &time_n, 4);
         memcpy(iv + 8, out_privacy_params, 8);
 
+        // Localiza a privKey para o engine local (usar o primeiro bloco de 16 bytes)
+        byte localized_priv_key[MBEDTLS_MD_MAX_SIZE];
+        int localized_priv_key_len = 0;
+        bool ok_priv = localizePrivKeyForEngine(user, this->_engineID, this->_engineIDLength, localized_priv_key, localized_priv_key_len);
+        if (!ok_priv) {
+            Serial.println("Encrypt failed: could not localize priv key for local engineID.");
+            return 0;
+        }
+
+        // Debug prints
+        Serial.print("IV for encryption: ");
+        for (int i=0;i<16;i++) Serial.printf("%02X", iv[i]);
+        Serial.println();
+
+        Serial.print("Localized privKey (first 16 bytes used): ");
+        for (int i=0;i<16;i++) Serial.printf("%02X", localized_priv_key[i]);
+        Serial.println();
+
+        // AES key é os primeiros 16 bytes do resultado localizado (RFC)
         mbedtls_aes_context aes_ctx;
         mbedtls_aes_init(&aes_ctx);
-        mbedtls_aes_setkey_enc(&aes_ctx, user.privKey, 128);
+        mbedtls_aes_setkey_enc(&aes_ctx, localized_priv_key, 128);
 
         size_t iv_off = 0;
         mbedtls_aes_crypt_cfb128(&aes_ctx, MBEDTLS_AES_ENCRYPT, pdu_len, &iv_off, iv, pdu, encrypted_pdu);
