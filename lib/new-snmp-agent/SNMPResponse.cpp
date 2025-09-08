@@ -195,9 +195,6 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
     secParamsStruct->addValueToList(std::make_shared<IntegerType>(usm.getEngineBoots()));
     // Em vez de criar um OctetType temporário para privacy, criamos e guardamos o ponteiro
     secParamsStruct->addValueToList(privParamPtr);
-    // Em vez de criar um OctetType temporário para privacy, criamos e guardamos o ponteiro
-    // auto privParamPtr = std::make_shared<OctetType>(std::string((char*)privacyParameters, _v3_user->securityLevel == AUTH_PRIV ? 8 : 0));
-    secParamsStruct->addValueToList(privParamPtr);
 
     // --- Serializa initial dos securityParameters, mas guardamos a OctetType para permitir atualização posterior ---
     uint8_t secParamsBuf[128];
