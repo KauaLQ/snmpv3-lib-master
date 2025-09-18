@@ -193,6 +193,9 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
     auto secParamsStruct = std::make_shared<ComplexType>(STRUCTURE);
     secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string((char*)usm.getEngineID(), usm.getEngineIDLength())));
     secParamsStruct->addValueToList(std::make_shared<IntegerType>(usm.getEngineBoots()));
+    secParamsStruct->addValueToList(std::make_shared<IntegerType>(usm.getEngineTime()));
+    secParamsStruct->addValueToList(std::make_shared<OctetType>(std::string(_v3_user->userName)));
+    secParamsStruct->addValueToList(authParamPtr); // Adiciona o placeholder
     // Em vez de criar um OctetType temporário para privacy, criamos e guardamos o ponteiro
     secParamsStruct->addValueToList(privParamPtr);
 
@@ -207,8 +210,17 @@ int SNMPResponse::serialiseIntoV3(uint8_t* buf, size_t max_len, USM& usm) {
     auto secParamsOct = std::make_shared<OctetType>(std::string((char*)secParamsBuf, secParamsLen));
     this->packet->addValueToList(secParamsOct);
 
-    // Adicionar ScopedPDU (criptografada ou não)
-    this->packet->addValueToList(std::make_shared<OctetType>(std::string((char*)finalScopedPDUBytes, finalScopedPDULen)));
+    // Adicionar ScopedPDU: se AUTH_PRIV, vai criptografado como OctetString;
+    // se apenas AUTH_NO_PRIV, vai em claro como ComplexType.
+    if (_v3_user->securityLevel == AUTH_PRIV) {
+        // ScopedPDU criptografado
+        this->packet->addValueToList(
+            std::make_shared<OctetType>(std::string((char*)finalScopedPDUBytes, finalScopedPDULen))
+        );
+    } else {
+        // ScopedPDU em claro (já temos ele em "scopedPDU")
+        this->packet->addValueToList(scopedPDU);
+    }
 
     // --- TÓPICOS 4 & 5: Serializar e Autenticar ---
     // Serializa o pacote com o placeholder de autenticação (zeros)

@@ -23,7 +23,7 @@ void USM::begin() {
     Preferences preferences;
     preferences.begin("snmp-agent", false);
     _engineBoots = preferences.getUInt("engineBoots", 0);
-    _engineBoots++;
+    // _engineBoots++;
     preferences.putUInt("engineBoots", _engineBoots);
     preferences.end();
 
@@ -471,10 +471,12 @@ int USM::encryptPDU(const SNMPV3User& user, const byte* pdu, uint16_t pdu_len, b
 
     if (user.privProtocol == PRIV_PROTOCOL_AES) {
         // Gerar salt de privacidade (8 bytes) - incrementa contador local
-        uint64_t salt = ++_privSaltCounter;
-        for (int i = 0; i < 8; i++) out_privacy_params[7 - i] = (salt >> (i * 8)) & 0xFF;
+        uint32_t salt_high = htonl(this->_engineBoots);
+        uint32_t salt_low  = htonl(++_privSaltCounter);
 
-        // Monta IV = engineBoots (4 bytes), engineTime (4 bytes), privacyParams (8 bytes)
+        memcpy(out_privacy_params, &salt_high, 4);
+        memcpy(out_privacy_params + 4, &salt_low, 4);
+
         uint8_t iv[16];
         uint32_t boots_n = htonl(this->_engineBoots);
         uint32_t time_n = htonl(this->getEngineTime());

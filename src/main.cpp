@@ -45,7 +45,7 @@ void setup() {
   // Senha de Autenticação: myauthpass
   // Senha de Privacidade (Criptografia): myprivpass
   bool userAdded = agent.addUser("esp32user", 
-                                 AUTH_PRIV,        // Nível de segurança: Autenticação e Privacidade
+                                 AUTH_NO_PRIV,        // Nível de segurança: Autenticação e Privacidade
                                  AUTH_PROTOCOL_SHA,// Protocolo de Autenticação: SHA
                                  "myauthpass",     // Senha de Autenticação
                                  PRIV_PROTOCOL_AES,// Protocolo de Privacidade: AES
