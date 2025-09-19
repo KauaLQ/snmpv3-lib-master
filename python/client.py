@@ -67,7 +67,7 @@ from pysnmp.hlapi import *
 from pysnmp import debug
 
 # Ativa logs de debug no console
-debug.setLogger(debug.Debug('msgproc'))
+debug.setLogger(debug.Debug('msgproc', 'secmod'))
 
 iterator = getCmd(
     SnmpEngine(),
@@ -78,7 +78,7 @@ iterator = getCmd(
         authProtocol=usmHMACSHAAuthProtocol,
         privProtocol=usmNoPrivProtocol
     ),
-    UdpTransportTarget(('192.168.5.113', 161), timeout=5, retries=1),
+    UdpTransportTarget(('192.168.5.101', 161), timeout=5, retries=1),
     ContextData(),
     ObjectType(ObjectIdentity('1.3.6.1.4.1.12345.1.0'))
 )
